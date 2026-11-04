@@ -38,32 +38,34 @@ Client MCP ──stdio──▶ server/pinceau_mcp (41 outils, Python + SDK mcp)
 ## Installation
 
 ```bash
-git clone <ce dépôt> pinceau
+git clone https://github.com/Ealemun/pinceau
 cd pinceau
-pip install -r requirements.txt
-python install.py
+python install.py --mcp-config "<chemin du fichier de config JSON de ton client MCP>"
 ```
 
-`install.py` copie le plugin dans `<profil GIMP>/plug-ins/pinceau/` (Windows :
-`%APPDATA%\GIMP\3.x\plug-ins`, Linux : `~/.config/GIMP/3.x/plug-ins`, macOS :
-`~/Library/Application Support/GIMP/3.x/plug-ins`) et affiche la configuration MCP à coller.
+Cette seule commande :
+
+1. installe les dépendances Python (`requirements.txt`) dans le Python qui l'exécute ;
+2. copie le plugin dans `<profil GIMP>/plug-ins/pinceau/` (Windows : `%APPDATA%\GIMP\3.x\plug-ins`,
+   Linux : `~/.config/GIMP/3.x/plug-ins`, macOS : `~/Library/Application Support/GIMP/3.x/plug-ins`) ;
+3. ajoute l'entrée `pinceau` sous `"mcpServers"` dans le fichier de config indiqué, sans toucher
+   aux autres serveurs (une copie `.bak` est faite avant). `--mcp-config` est répétable pour
+   inscrire Pinceau dans plusieurs clients.
+
+Sans `--mcp-config`, le script affiche l'entrée JSON à coller à la main (`--print-entry` l'affiche
+seule). Pour un client qui s'inscrit par ligne de commande plutôt que par fichier, l'entrée donne
+la commande à lancer : `<python> -m pinceau_mcp` avec `PYTHONPATH=<dossier pinceau>/server`.
 
 Ensuite :
 
 1. (Re)démarre GIMP.
 2. Menu **Outils > Démarrer le serveur Pinceau**. Un message confirme le port. À refaire à
    chaque lancement de GIMP.
-3. Ajoute le serveur au client MCP, par exemple dans son fichier de configuration JSON :
+3. Redémarre le client MCP.
 
-```json
-"pinceau": {
-  "command": "python",
-  "args": ["-m", "pinceau_mcp"],
-  "env": { "PYTHONPATH": "C:\\chemin\\vers\\pinceau\\server" }
-}
-```
+Désinstallation : `python install.py --uninstall --mcp-config <même fichier>`.
 
-(`install.py` imprime cette entrée avec les chemins exacts de ta machine.)
+Options : `--dir` force le dossier plug-ins de GIMP, `--no-pip` saute l'installation des dépendances.
 
 ## Vérifier l'installation
 
