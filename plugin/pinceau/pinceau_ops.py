@@ -49,6 +49,18 @@ def _err(message):
     raise ValueError(message)
 
 
+def _check(value, action):
+    """Vérifie le retour d'un appel GIMP et lève une erreur lisible en cas d'échec.
+
+    Le plugin gère lui-même les erreurs PDB (pas de fenêtre d'erreur dans GIMP) :
+    un appel qui échoue renvoie False ou None, et GIMP garde le message dans
+    pdb.get_last_error(). Cette fonction le remonte au client MCP.
+    """
+    if value is None or value is False:
+        _err(f"{action} a échoué : {Gimp.get_pdb().get_last_error()}")
+    return value
+
+
 def _all_images():
     """Liste des images ouvertes, quelle que soit la version de l'API."""
     for name in ("get_images", "list_images"):
@@ -247,7 +259,7 @@ def _png_bytes_of_image(image, max_size=None, region=None):
     try:
         if region:
             x, y, w, h = (int(region[k]) for k in ("x", "y", "width", "height"))
-            dup.crop(w, h, x, y)
+            _check(dup.crop(w, h, x, y), "crop")
         try:
             dup.merge_visible_layers(Gimp.MergeType.CLIP_TO_IMAGE)
         except Exception:  # noqa: BLE001 — aucun calque visible : on exporte tel quel
@@ -259,7 +271,7 @@ def _png_bytes_of_image(image, max_size=None, region=None):
             w, h = dup.get_width(), dup.get_height()
             scale = min(1.0, float(max_size) / max(w, h))
             if scale < 1.0:
-                dup.scale(max(1, int(w * scale)), max(1, int(h * scale)))
+                _check(dup.scale(max(1, int(w * scale)), max(1, int(h * scale))), "scale")
         return _png_bytes_via_tempfile(dup)
     finally:
         dup.delete()
@@ -412,8 +424,8 @@ def op_snapshot(p):
         tmp = Gimp.Image.new(layer.get_width(), layer.get_height(), Gimp.ImageBaseType.RGB)
         try:
             copy = Gimp.Layer.new_from_drawable(layer, tmp)
-            tmp.insert_layer(copy, None, 0)
-            copy.set_offsets(0, 0)
+            _check(tmp.insert_layer(copy, None, 0), "insert_layer")
+            _check(copy.set_offsets(0, 0), "set_offsets")
             copy.set_visible(True)
             copy.set_opacity(100.0)
             data = _png_bytes_of_image(tmp, max_size=max_size)
@@ -458,17 +470,17 @@ def op_image_new(p):
     image = Gimp.Image.new(w, h, Gimp.ImageBaseType.RGB)
     layer = Gimp.Layer.new(image, p.get("layer_name", "Fond"), w, h,
                            Gimp.ImageType.RGBA_IMAGE, 100.0, Gimp.LayerMode.NORMAL)
-    image.insert_layer(layer, None, 0)
+    _check(image.insert_layer(layer, None, 0), "insert_layer")
     fill = p.get("fill")  # None = transparent
     if fill:
         Gimp.context_push()
         try:
             Gimp.context_set_foreground(_color(fill))
-            layer.edit_fill(Gimp.FillType.FOREGROUND)
+            _check(layer.edit_fill(Gimp.FillType.FOREGROUND), "edit_fill")
         finally:
             Gimp.context_pop()
     else:
-        layer.edit_clear()
+        _check(layer.edit_clear(), "edit_clear")
     if p.get("display", True):
         Gimp.Display.new(image)
     _set_current(image)
@@ -502,7 +514,7 @@ def op_image_place(p):
         if layer is None:
             _err(f"GIMP n'a pas pu charger {path}")
         parent = _layer(image, p, "parent_id", "parent_name", required=False) if (p.get("parent_id") or p.get("parent_name")) else None
-        image.insert_layer(layer, parent, int(p.get("position", 0)))
+        _check(image.insert_layer(layer, parent, int(p.get("position", 0))), "insert_layer")
         if p.get("name"):
             layer.set_name(p["name"])
         if not layer.has_alpha():
@@ -518,8 +530,8 @@ def op_image_place(p):
                 th = lh * float(tw) / lw
             elif th and not tw:
                 tw = lw * float(th) / lh
-            layer.scale(max(1, int(tw)), max(1, int(th)), False)
-        layer.set_offsets(int(p.get("x", 0)), int(p.get("y", 0)))
+            _check(layer.scale(max(1, int(tw)), max(1, int(th)), False), "scale")
+        _check(layer.set_offsets(int(p.get("x", 0)), int(p.get("y", 0))), "set_offsets")
         if p.get("opacity") is not None:
             layer.set_opacity(float(p["opacity"]))
         if p.get("mode"):
@@ -556,7 +568,7 @@ def op_image_export(p):
             w, h = dup.get_width(), dup.get_height()
             scale = min(1.0, float(max_size) / max(w, h))
             if scale < 1.0:
-                dup.scale(max(1, int(w * scale)), max(1, int(h * scale)))
+                _check(dup.scale(max(1, int(w * scale)), max(1, int(h * scale))), "scale")
             _export(dup, path)
         finally:
             dup.delete()
@@ -581,7 +593,7 @@ def op_image_resize_canvas(p):
     """Change la taille du canevas sans redimensionner les pixels."""
     image = _image(p)
     with _undo(image):
-        image.resize(int(p["width"]), int(p["height"]), int(p.get("offset_x", 0)), int(p.get("offset_y", 0)))
+        _check(image.resize(int(p["width"]), int(p["height"]), int(p.get("offset_x", 0)), int(p.get("offset_y", 0))), "resize")
         if p.get("resize_layers", False):
             for layer in _iter_layers(image.get_layers()):
                 if not layer.is_group():
@@ -595,7 +607,7 @@ def op_image_scale(p):
         Gimp.context_push()
         Gimp.context_set_interpolation(_enum(Gimp.InterpolationType, p.get("interpolation"), Gimp.InterpolationType.LOHALO))
         try:
-            image.scale(int(p["width"]), int(p["height"]))
+            _check(image.scale(int(p["width"]), int(p["height"])), "scale")
         finally:
             Gimp.context_pop()
     return _describe_image(image)
@@ -606,12 +618,12 @@ def op_image_crop(p):
     image = _image(p)
     with _undo(image):
         if p.get("width") and p.get("height"):
-            image.crop(int(p["width"]), int(p["height"]), int(p.get("x", 0)), int(p.get("y", 0)))
+            _check(image.crop(int(p["width"]), int(p["height"]), int(p.get("x", 0)), int(p.get("y", 0))), "crop")
         else:
             _ok, ok, x1, y1, x2, y2 = Gimp.Selection.bounds(image)  # (succès, non vide, x1, y1, x2, y2)
             if not ok:
                 _err("aucune sélection et aucun rectangle fourni")
-            image.crop(x2 - x1, y2 - y1, x1, y1)
+            _check(image.crop(x2 - x1, y2 - y1, x1, y1), "crop")
     return _describe_image(image)
 
 
@@ -623,21 +635,21 @@ def op_image_rotate(p):
     if deg not in rot:
         _err("degrees doit valoir 90, 180 ou 270 (sinon utilise layer_transform rotate)")
     with _undo(image):
-        image.rotate(rot[deg])
+        _check(image.rotate(rot[deg]), "rotate")
     return _describe_image(image)
 
 
 def op_image_flip(p):
     image = _image(p)
     with _undo(image):
-        image.flip(_enum(Gimp.OrientationType, p.get("orientation", "horizontal")))
+        _check(image.flip(_enum(Gimp.OrientationType, p.get("orientation", "horizontal"))), "flip")
     return _describe_image(image)
 
 
 def op_image_flatten(p):
     image = _image(p)
     with _undo(image):
-        image.flatten()
+        _check(image.flatten(), "flatten")
     return _describe_image(image)
 
 
@@ -676,17 +688,17 @@ def op_layer_create(p):
         layer = Gimp.Layer.new(image, p.get("name", "Calque"), w, h, Gimp.ImageType.RGBA_IMAGE,
                                float(p.get("opacity", 100.0)), _enum(Gimp.LayerMode, p.get("mode"), Gimp.LayerMode.NORMAL))
         parent, position = _parent_and_position(image, p)
-        image.insert_layer(layer, parent, position)
+        _check(image.insert_layer(layer, parent, position), "insert_layer")
         if p.get("fill"):
             Gimp.context_push()
             try:
                 Gimp.context_set_foreground(_color(p["fill"]))
-                layer.edit_fill(Gimp.FillType.FOREGROUND)
+                _check(layer.edit_fill(Gimp.FillType.FOREGROUND), "edit_fill")
             finally:
                 Gimp.context_pop()
         else:
-            layer.edit_clear()
-        layer.set_offsets(int(p.get("x", 0)), int(p.get("y", 0)))
+            _check(layer.edit_clear(), "edit_clear")
+        _check(layer.set_offsets(int(p.get("x", 0)), int(p.get("y", 0))), "set_offsets")
         image.set_selected_layers([layer])
     return _describe_layer(layer)
 
@@ -697,11 +709,11 @@ def op_group_create(p):
     with _undo(image):
         group = Gimp.GroupLayer.new(image, p.get("name", "Groupe"))
         parent, position = _parent_and_position(image, p)
-        image.insert_layer(group, parent, position)
+        _check(image.insert_layer(group, parent, position), "insert_layer")
         for i, lid in enumerate(p.get("layer_ids") or []):
             child = Gimp.Layer.get_by_id(int(lid))
             if child is not None:
-                image.reorder_item(child, group, i)
+                _check(image.reorder_item(child, group, i), "reorder_item")
         image.set_selected_layers([group])
     return _describe_layer(group)
 
@@ -711,7 +723,7 @@ def op_layer_duplicate(p):
     layer = _layer(image, p)
     with _undo(image):
         copy = layer.copy()
-        image.insert_layer(copy, layer.get_parent(), image.get_item_position(layer))
+        _check(image.insert_layer(copy, layer.get_parent(), image.get_item_position(layer)), "insert_layer")
         if p.get("name"):
             copy.set_name(p["name"])
         image.set_selected_layers([copy])
@@ -723,7 +735,7 @@ def op_layer_delete(p):
     layer = _layer(image, p)
     name = layer.get_name()
     with _undo(image):
-        image.remove_layer(layer)
+        _check(image.remove_layer(layer), "remove_layer")
     return {"deleted": name}
 
 
@@ -746,7 +758,7 @@ def op_layer_set(p):
             layer.set_lock_content(bool(p["lock_content"]))
         if p.get("x") is not None or p.get("y") is not None:
             ok, ox, oy = layer.get_offsets()
-            layer.set_offsets(int(p.get("x", ox)), int(p.get("y", oy)))
+            _check(layer.set_offsets(int(p.get("x", ox)), int(p.get("y", oy))), "set_offsets")
         if p.get("add_alpha") and not layer.has_alpha():
             layer.add_alpha()
         if p.get("select", True):
@@ -764,7 +776,7 @@ def op_layer_move(p):
             parent = None
             if p.get("parent_id") is not None or p.get("parent_name"):
                 parent = _layer(image, p, "parent_id", "parent_name")
-        image.reorder_item(layer, parent, int(p.get("position", 0)))
+        _check(image.reorder_item(layer, parent, int(p.get("position", 0))), "reorder_item")
     return _describe_layer(layer)
 
 
@@ -804,21 +816,21 @@ def op_layer_transform(p):
                     th = float(p.get("height", lh * tw / lw if p.get("width") and not p.get("height") else lh))
                     if p.get("height") and not p.get("width"):
                         tw = lw * th / lh
-                layer.scale(max(1, int(tw)), max(1, int(th)), bool(p.get("local_origin", False)))
+                _check(layer.scale(max(1, int(tw)), max(1, int(th)), bool(p.get("local_origin", False))), "scale")
             elif kind == "rotate":
                 import math
                 angle = math.radians(float(p.get("degrees", 0)))
                 auto = p.get("center_x") is None
-                layer.transform_rotate(angle, auto, float(p.get("center_x", 0)), float(p.get("center_y", 0)))
+                _check(layer.transform_rotate(angle, auto, float(p.get("center_x", 0)), float(p.get("center_y", 0))), "transform_rotate")
             elif kind == "flip":
-                layer.transform_flip_simple(_enum(Gimp.OrientationType, p.get("orientation", "horizontal")), True, 0.0)
+                _check(layer.transform_flip_simple(_enum(Gimp.OrientationType, p.get("orientation", "horizontal")), True, 0.0), "transform_flip_simple")
             elif kind == "perspective":
                 c = p["corners"]  # [[x0,y0],[x1,y1],[x2,y2],[x3,y3]] : haut-gauche, haut-droit, bas-gauche, bas-droit
-                layer.transform_perspective(*(float(v) for pair in c for v in pair))
+                _check(layer.transform_perspective(*(float(v) for pair in c for v in pair)), "transform_perspective")
             elif kind == "offset":
-                layer.set_offsets(ox + int(p.get("dx", 0)), oy + int(p.get("dy", 0)))
+                _check(layer.set_offsets(ox + int(p.get("dx", 0)), oy + int(p.get("dy", 0))), "set_offsets")
             elif kind == "shear":
-                layer.transform_shear(_enum(Gimp.OrientationType, p.get("orientation", "horizontal")), float(p.get("amount", 0)))
+                _check(layer.transform_shear(_enum(Gimp.OrientationType, p.get("orientation", "horizontal")), float(p.get("amount", 0))), "transform_shear")
             else:
                 _err("kind doit être scale, rotate, flip, perspective, shear ou offset")
         finally:
@@ -836,7 +848,7 @@ def op_layer_align(p):
     hx = {"left": 0, "center": (iw - lw) // 2, "right": iw - lw}.get(p.get("horizontal"), ox)
     vy = {"top": 0, "middle": (ih - lh) // 2, "bottom": ih - lh}.get(p.get("vertical"), oy)
     with _undo(image):
-        layer.set_offsets(hx + int(p.get("dx", 0)), vy + int(p.get("dy", 0)))
+        _check(layer.set_offsets(hx + int(p.get("dx", 0)), vy + int(p.get("dy", 0))), "set_offsets")
     return _describe_layer(layer)
 
 
@@ -855,14 +867,14 @@ def op_mask(p):
                 _err("ce calque a déjà un masque")
             kind = _enum(Gimp.AddMaskType, p.get("from", "white"))
             mask = layer.create_mask(kind)
-            layer.add_mask(mask)
+            _check(layer.add_mask(mask), "add_mask")
             if p.get("invert"):
                 mask.invert(False)
             layer.set_edit_mask(bool(p.get("edit", False)))
         elif action == "apply":
-            layer.remove_mask(Gimp.MaskApplyMode.APPLY)
+            _check(layer.remove_mask(Gimp.MaskApplyMode.APPLY), "remove_mask")
         elif action == "delete":
-            layer.remove_mask(Gimp.MaskApplyMode.DISCARD)
+            _check(layer.remove_mask(Gimp.MaskApplyMode.DISCARD), "remove_mask")
         elif action == "edit":
             layer.set_edit_mask(bool(p.get("edit", True)))
         elif action == "show":
@@ -900,27 +912,27 @@ def op_select(p):
             _selection_context(p)
             if shape == "rectangle":
                 if p.get("radius"):  # coins arrondis
-                    image.select_round_rectangle(mode, float(p["x"]), float(p["y"]), float(p["width"]), float(p["height"]),
-                                                 float(p["radius"]), float(p["radius"]))
+                    _check(image.select_round_rectangle(mode, float(p["x"]), float(p["y"]), float(p["width"]), float(p["height"]),
+                                                 float(p["radius"]), float(p["radius"])), "select_round_rectangle")
                 else:
-                    image.select_rectangle(mode, float(p["x"]), float(p["y"]), float(p["width"]), float(p["height"]))
+                    _check(image.select_rectangle(mode, float(p["x"]), float(p["y"]), float(p["width"]), float(p["height"])), "select_rectangle")
             elif shape == "ellipse":
-                image.select_ellipse(mode, float(p["x"]), float(p["y"]), float(p["width"]), float(p["height"]))
+                _check(image.select_ellipse(mode, float(p["x"]), float(p["y"]), float(p["width"]), float(p["height"])), "select_ellipse")
             elif shape == "polygon":
                 pts = [float(v) for pair in p["points"] for v in pair]
-                image.select_polygon(mode, pts)
+                _check(image.select_polygon(mode, pts), "select_polygon")
             elif shape == "contiguous":  # baguette magique
                 d = _drawable(image, p)
-                image.select_contiguous_color(mode, d, float(p["x"]), float(p["y"]))
+                _check(image.select_contiguous_color(mode, d, float(p["x"]), float(p["y"])), "select_contiguous_color")
             elif shape == "color":  # tous les pixels de cette couleur
                 d = _drawable(image, p)
-                image.select_color(mode, d, _color(p["color"]))
+                _check(image.select_color(mode, d, _color(p["color"])), "select_color")
             elif shape == "path":
                 path = _path(image, p)
-                image.select_item(mode, path)
+                _check(image.select_item(mode, path), "select_item")
             elif shape == "layer_alpha":
                 layer = _layer(image, p)
-                image.select_item(mode, layer)
+                _check(image.select_item(mode, layer), "select_item")
             elif shape == "all":
                 Gimp.Selection.all(image)
             elif shape == "none":
@@ -982,7 +994,7 @@ def op_selection_load(p):
     if channel is None:
         _err("canal introuvable")
     with _undo(image):
-        image.select_item(_enum(Gimp.ChannelOps, p.get("mode"), Gimp.ChannelOps.REPLACE), channel)
+        _check(image.select_item(_enum(Gimp.ChannelOps, p.get("mode"), Gimp.ChannelOps.REPLACE), channel), "select_item")
     return _selection_info(image)
 
 
@@ -1040,9 +1052,9 @@ def op_path_stroke(p):
             Gimp.context_set_antialias(True)
             Gimp.context_set_opacity(float(p.get("opacity", 100.0)))
             if p.get("target_selection"):
-                d.edit_stroke_selection()
+                _check(d.edit_stroke_selection(), "edit_stroke_selection")
             else:
-                d.edit_stroke_item(_path(image, p))
+                _check(d.edit_stroke_item(_path(image, p)), "edit_stroke_item")
         finally:
             Gimp.context_pop()
     return _describe_layer(_layer(image, p))
@@ -1072,16 +1084,16 @@ def op_fill(p):
             Gimp.context_set_opacity(float(p.get("opacity", 100.0)))
             Gimp.context_set_paint_mode(_enum(Gimp.LayerMode, p.get("mode"), Gimp.LayerMode.NORMAL))
             if p.get("clear"):
-                d.edit_clear()
+                _check(d.edit_clear(), "edit_clear")
             elif p.get("pattern"):
                 pattern = Gimp.Pattern.get_by_name(p["pattern"])
                 if pattern is None:
                     _err(f"motif « {p['pattern']} » introuvable")
                 Gimp.context_set_pattern(pattern)
-                d.edit_fill(Gimp.FillType.PATTERN)
+                _check(d.edit_fill(Gimp.FillType.PATTERN), "edit_fill")
             else:
                 Gimp.context_set_foreground(_color(p.get("color"), "#000000"))
-                d.edit_fill(Gimp.FillType.FOREGROUND)
+                _check(d.edit_fill(Gimp.FillType.FOREGROUND), "edit_fill")
         finally:
             Gimp.context_pop()
     return _describe_layer(_layer(image, p))
@@ -1099,7 +1111,7 @@ def op_bucket_fill(p):
             Gimp.context_set_sample_threshold(float(p.get("threshold", 0.15)))
             Gimp.context_set_sample_merged(bool(p.get("sample_merged", False)))
             Gimp.context_set_antialias(True)
-            d.edit_bucket_fill(Gimp.FillType.FOREGROUND, float(p["x"]), float(p["y"]))
+            _check(d.edit_bucket_fill(Gimp.FillType.FOREGROUND, float(p["x"]), float(p["y"])), "edit_bucket_fill")
         finally:
             Gimp.context_pop()
     return _describe_layer(_layer(image, p))
@@ -1126,9 +1138,9 @@ def op_gradient(p):
             Gimp.context_set_gradient_reverse(bool(p.get("reverse", False)))
             Gimp.context_set_opacity(float(p.get("opacity", 100.0)))
             Gimp.context_set_paint_mode(_enum(Gimp.LayerMode, p.get("mode"), Gimp.LayerMode.NORMAL))
-            d.edit_gradient_fill(_enum(Gimp.GradientType, p.get("shape"), Gimp.GradientType.LINEAR),
+            _check(d.edit_gradient_fill(_enum(Gimp.GradientType, p.get("shape"), Gimp.GradientType.LINEAR),
                                  float(p.get("offset", 0.0)), False, 1, 0.0, True,
-                                 float(p["x1"]), float(p["y1"]), float(p["x2"]), float(p["y2"]))
+                                 float(p["x1"]), float(p["y1"]), float(p["x2"]), float(p["y2"])), "edit_gradient_fill")
         finally:
             Gimp.context_pop()
     return _describe_layer(_layer(image, p))
@@ -1162,20 +1174,20 @@ def op_paint(p):
             if p.get("color"):
                 Gimp.context_set_foreground(_color(p["color"]))
             if tool == "paintbrush":
-                Gimp.paintbrush_default(d, pts)
+                _check(Gimp.paintbrush_default(d, pts), "paintbrush_default")
             elif tool == "pencil":
-                Gimp.pencil(d, pts)
+                _check(Gimp.pencil(d, pts), "pencil")
             elif tool == "airbrush":
-                Gimp.airbrush(d, float(p.get("pressure", 50.0)), pts)
+                _check(Gimp.airbrush(d, float(p.get("pressure", 50.0)), pts), "airbrush")
             elif tool == "eraser":
-                Gimp.eraser_default(d, pts)
+                _check(Gimp.eraser_default(d, pts), "eraser_default")
             elif tool == "smudge":
-                Gimp.smudge(d, float(p.get("pressure", 50.0)), pts)
+                _check(Gimp.smudge(d, float(p.get("pressure", 50.0)), pts), "smudge")
             elif tool in ("dodge", "burn"):
-                Gimp.dodgeburn_default(d, pts)
+                _check(Gimp.dodgeburn_default(d, pts), "dodgeburn_default")
             elif tool == "clone":
                 src = _layer(image, p, "source_layer_id", "source_layer_name")
-                Gimp.clone(d, src, Gimp.CloneType.IMAGE, float(p["source_x"]), float(p["source_y"]), pts)
+                _check(Gimp.clone(d, src, Gimp.CloneType.IMAGE, float(p["source_x"]), float(p["source_y"]), pts), "clone")
             else:
                 _err("tool inconnu")
         finally:
@@ -1192,7 +1204,7 @@ def op_text_add(p):
             font = Gimp.context_get_font()
         layer = Gimp.TextLayer.new(image, p["text"], font, float(p.get("size", 48)), Gimp.Unit.pixel())
         parent, position = _parent_and_position(image, p)
-        image.insert_layer(layer, parent, position)
+        _check(image.insert_layer(layer, parent, position), "insert_layer")
         if p.get("name"):
             layer.set_name(p["name"])
         layer.set_color(_color(p.get("color"), "#000000"))
@@ -1204,8 +1216,8 @@ def op_text_add(p):
         if p.get("line_spacing") is not None:
             layer.set_line_spacing(float(p["line_spacing"]))
         if p.get("width"):  # boîte de texte fixe (retour à la ligne automatique)
-            layer.resize(float(p["width"]), float(p.get("height", layer.get_height())))
-        layer.set_offsets(int(p.get("x", 0)), int(p.get("y", 0)))
+            _check(layer.resize(float(p["width"]), float(p.get("height", layer.get_height()))), "resize")
+        _check(layer.set_offsets(int(p.get("x", 0)), int(p.get("y", 0))), "set_offsets")
         if p.get("opacity") is not None:
             layer.set_opacity(float(p["opacity"]))
         if p.get("mode"):
@@ -1238,7 +1250,7 @@ def op_text_edit(p):
             layer.set_justification(_enum(Gimp.TextJustification, p["justify"]))
         if p.get("x") is not None or p.get("y") is not None:
             ok, ox, oy = layer.get_offsets()
-            layer.set_offsets(int(p.get("x", ox)), int(p.get("y", oy)))
+            _check(layer.set_offsets(int(p.get("x", ox)), int(p.get("y", oy))), "set_offsets")
     return _describe_layer(layer)
 
 
@@ -1272,39 +1284,39 @@ def op_adjust(p):
     with _undo(image):
         if kind == "brightness_contrast":
             # brightness / contrast en -100..100 (convertis en -1..1)
-            d.brightness_contrast(float(p.get("brightness", 0)) / 100.0, float(p.get("contrast", 0)) / 100.0)
+            _check(d.brightness_contrast(float(p.get("brightness", 0)) / 100.0, float(p.get("contrast", 0)) / 100.0), "brightness_contrast")
         elif kind == "levels":
             channel = _enum(Gimp.HistogramChannel, p.get("channel"), Gimp.HistogramChannel.VALUE)
-            d.levels(channel, float(p.get("low_in", 0)) / 255.0, float(p.get("high_in", 255)) / 255.0, True,
-                     float(p.get("gamma", 1.0)), float(p.get("low_out", 0)) / 255.0, float(p.get("high_out", 255)) / 255.0, True)
+            _check(d.levels(channel, float(p.get("low_in", 0)) / 255.0, float(p.get("high_in", 255)) / 255.0, True,
+                     float(p.get("gamma", 1.0)), float(p.get("low_out", 0)) / 255.0, float(p.get("high_out", 255)) / 255.0, True), "levels")
         elif kind == "curves":
             # points : [[x, y], ...] en 0..255, sur le canal choisi
             channel = _enum(Gimp.HistogramChannel, p.get("channel"), Gimp.HistogramChannel.VALUE)
             pts = [float(v) / 255.0 for pair in p["points"] for v in pair]
-            d.curves_spline(channel, pts)
+            _check(d.curves_spline(channel, pts), "curves_spline")
         elif kind == "hue_saturation":
-            d.hue_saturation(_enum(Gimp.HueRange, p.get("range"), Gimp.HueRange.ALL), float(p.get("hue", 0)),
-                             float(p.get("lightness", 0)), float(p.get("saturation", 0)), float(p.get("overlap", 0)))
+            _check(d.hue_saturation(_enum(Gimp.HueRange, p.get("range"), Gimp.HueRange.ALL), float(p.get("hue", 0)),
+                             float(p.get("lightness", 0)), float(p.get("saturation", 0)), float(p.get("overlap", 0))), "hue_saturation")
         elif kind == "color_balance":
-            d.color_balance(_enum(Gimp.TransferMode, p.get("range"), Gimp.TransferMode.MIDTONES), bool(p.get("preserve_luminosity", True)),
-                            float(p.get("cyan_red", 0)), float(p.get("magenta_green", 0)), float(p.get("yellow_blue", 0)))
+            _check(d.color_balance(_enum(Gimp.TransferMode, p.get("range"), Gimp.TransferMode.MIDTONES), bool(p.get("preserve_luminosity", True)),
+                            float(p.get("cyan_red", 0)), float(p.get("magenta_green", 0)), float(p.get("yellow_blue", 0))), "color_balance")
         elif kind == "colorize":
-            d.colorize_hsl(float(p.get("hue", 180)), float(p.get("saturation", 50)), float(p.get("lightness", 0)))
+            _check(d.colorize_hsl(float(p.get("hue", 180)), float(p.get("saturation", 50)), float(p.get("lightness", 0))), "colorize_hsl")
         elif kind == "desaturate":
-            d.desaturate(_enum(Gimp.DesaturateMode, p.get("mode"), Gimp.DesaturateMode.LUMINANCE))
+            _check(d.desaturate(_enum(Gimp.DesaturateMode, p.get("mode"), Gimp.DesaturateMode.LUMINANCE)), "desaturate")
         elif kind == "invert":
             d.invert(bool(p.get("linear", False)))
         elif kind == "threshold":
-            d.threshold(_enum(Gimp.HistogramChannel, p.get("channel"), Gimp.HistogramChannel.VALUE),
-                        float(p.get("low", 127)) / 255.0, float(p.get("high", 255)) / 255.0)
+            _check(d.threshold(_enum(Gimp.HistogramChannel, p.get("channel"), Gimp.HistogramChannel.VALUE),
+                        float(p.get("low", 127)) / 255.0, float(p.get("high", 255)) / 255.0), "threshold")
         elif kind == "posterize":
-            d.posterize(int(p.get("levels", 4)))
+            _check(d.posterize(int(p.get("levels", 4))), "posterize")
         elif kind == "auto_levels":
-            d.levels_stretch()
+            _check(d.levels_stretch(), "levels_stretch")
         elif kind == "shadows_highlights":
-            d.shadows_highlights(float(p.get("shadows", 0)), float(p.get("highlights", 0)), float(p.get("whitepoint", 0)),
+            _check(d.shadows_highlights(float(p.get("shadows", 0)), float(p.get("highlights", 0)), float(p.get("whitepoint", 0)),
                                  float(p.get("radius", 100)), float(p.get("compress", 50)), float(p.get("shadows_ccorrect", 100)),
-                                 float(p.get("highlights_ccorrect", 50)))
+                                 float(p.get("highlights_ccorrect", 50))), "shadows_highlights")
         else:
             _err("kind d'ajustement inconnu")
     return _describe_layer(_layer(image, p))
@@ -1313,6 +1325,57 @@ def op_adjust(p):
 # =============================================================================
 # Filtres GEGL (générique, destructif ou non destructif)
 # =============================================================================
+
+# Règles reprises de GIMP 3.2 (app/gegl/gimp-gegl-utils.c, gimp_gegl_op_blacklisted) :
+# GIMP refuse ces opérations dans gimp-drawable-filter-new (« The filter is hidden »).
+_HIDDEN_CATEGORIES = {"compositors", "core", "debug", "display", "hidden", "input",
+                      "output", "programming", "transform", "video"}
+_HIDDEN_NAMES = {
+    "gegl:color", "gegl:contrast-curve", "gegl:convert-format", "gegl:ditto", "gegl:fill-path",
+    "gegl:gray", "gegl:hstack", "gegl:introspect", "gegl:json:dropshadow2", "gegl:json:grey2",
+    "gegl:layer", "gegl:lcms-from-profile", "gegl:linear-gradient", "gegl:map-absolute",
+    "gegl:map-relative", "gegl:matting-global", "gegl:matting-levin", "gegl:nop", "gegl:opacity",
+    "gegl:pack", "gegl:path", "gegl:posterize", "gegl:radial-gradient", "gegl:rectangle",
+    "gegl:seamless-clone", "gegl:text", "gegl:threshold", "gegl:tile", "gegl:unpremul",
+    "gegl:vector-stroke", "gegl:wavelet-blur", "gegl:gegl",
+}
+# Équivalents à utiliser automatiquement (même effet, version GIMP autorisée)
+_REPLACEMENTS = {"gegl:threshold": "gimp:threshold", "gegl:posterize": "gimp:posterize",
+                 "gegl:gray": "gimp:desaturate"}
+# Conseils quand il n'y a pas d'équivalent direct
+_ADVICE = {"gegl:linear-gradient": "utilise l'outil gimp_gradient",
+           "gegl:radial-gradient": "utilise l'outil gimp_gradient shape=\"radial\"",
+           "gegl:text": "utilise l'outil gimp_text",
+           "gegl:rectangle": "utilise gimp_select puis gimp_fill",
+           "gegl:path": "utilise gimp_path_create puis gimp_stroke",
+           "gegl:vector-stroke": "utilise gimp_path_create puis gimp_stroke"}
+# Opérations propres à GIMP (non listées par GEGL dans le processus du plugin)
+_GIMP_OPS = {
+    "gimp:brightness-contrast": "Luminosité-contraste", "gimp:color-balance": "Balance des couleurs",
+    "gimp:colorize": "Colorier", "gimp:curves": "Courbes", "gimp:desaturate": "Désaturer",
+    "gimp:hue-saturation": "Teinte-saturation", "gimp:levels": "Niveaux", "gimp:offset": "Décalage",
+    "gimp:posterize": "Postériser", "gimp:threshold": "Seuil", "gimp:semi-flatten": "Semi-aplatir",
+    "gimp:set-alpha": "Définir l'alpha", "gimp:threshold-alpha": "Seuil alpha",
+}
+
+
+def _filter_status(name):
+    """(autorisé, raison) pour une opération, selon les règles de GIMP 3.2."""
+    if name in _GIMP_OPS:
+        return True, ""
+    if name.startswith("gimp:"):
+        return False, "opération interne de GIMP non utilisable comme filtre"
+    if name in _HIDDEN_NAMES:
+        return False, "GIMP la masque (il utilise sa propre version)"
+    try:
+        categories = Gegl.Operation.get_key(name, "categories") or ""
+    except Exception:  # noqa: BLE001
+        categories = ""
+    hidden = _HIDDEN_CATEGORIES.intersection(categories.split(":"))
+    if hidden and name != "gimp:offset":
+        return False, f"catégorie « {sorted(hidden)[0]} » masquée par GIMP"
+    return True, ""
+
 
 def _gegl_ops():
     try:
@@ -1323,10 +1386,17 @@ def _gegl_ops():
 
 
 def op_filter_search(p):
-    """Recherche une opération GEGL par mot-clé (nom, titre, description)."""
+    """Recherche une opération utilisable comme filtre (GEGL autorisées + gimp:*) par mot-clé."""
     q = (p.get("query") or "").lower()
     results = []
+    # Opérations GIMP (couleur) d'abord : ce sont les versions recommandées
+    for name, title in _GIMP_OPS.items():
+        if q in name.lower() or q in title.lower():
+            results.append({"name": name, "title": title, "description": "opération GIMP"})
     for name in _gegl_ops():
+        allowed, _reason = _filter_status(name)
+        if not allowed:
+            continue  # GIMP refuserait ce filtre : inutile de le proposer
         title = Gegl.Operation.get_key(name, "title") or ""
         desc = Gegl.Operation.get_key(name, "description") or ""
         if q in name.lower() or q in title.lower() or q in desc.lower():
@@ -1335,17 +1405,41 @@ def op_filter_search(p):
 
 
 def op_filter_describe(p):
-    """Propriétés (nom, type, bornes, défaut, choix) d'une opération GEGL."""
-    name = p["name"]
-    props = Gegl.Operation.list_properties(name)
-    return {"name": name, "title": Gegl.Operation.get_key(name, "title") or "",
-            "description": Gegl.Operation.get_key(name, "description") or "",
-            "properties": [_pspec_info(ps) for ps in props]}
+    """Propriétés (nom, type, bornes, défaut, choix) d'une opération utilisable comme filtre."""
+    name = _resolve_filter_name(p["name"])
+    if not name.startswith("gimp:"):
+        props = Gegl.Operation.list_properties(name)
+        return {"name": name, "title": Gegl.Operation.get_key(name, "title") or "",
+                "description": Gegl.Operation.get_key(name, "description") or "",
+                "properties": [_pspec_info(ps) for ps in props]}
+    # Les opérations gimp:* n'existent que dans le processus GIMP : on crée un
+    # filtre temporaire (jamais appliqué) pour lire sa configuration.
+    image = _image(p)
+    flt = _check(Gimp.DrawableFilter.new(_layer(image, p), name, "pinceau-describe"),
+                 f"création du filtre {name}")
+    try:
+        props = [_pspec_info(ps) for ps in flt.get_config().list_properties()]
+    finally:
+        flt.delete()
+    return {"name": name, "title": _GIMP_OPS.get(name, ""), "description": "opération GIMP",
+            "properties": props}
+
+
+def _resolve_filter_name(name):
+    """Remplace une opération masquée par son équivalent GIMP, ou lève une erreur claire."""
+    if name in _REPLACEMENTS:
+        return _REPLACEMENTS[name]
+    allowed, reason = _filter_status(name)
+    if not allowed:
+        hint = _ADVICE.get(name, "cherche une alternative avec gimp_filter_search")
+        _err(f"« {name} » n'est pas utilisable dans GIMP 3.2 ({reason}) : {hint}.")
+    return name
 
 
 def _apply_filter(d, op_name, params, label=None, opacity=100.0, mode=None, non_destructive=False):
     """Crée un GimpDrawableFilter et l'applique (fusionné) ou l'attache (non destructif)."""
-    flt = Gimp.DrawableFilter.new(d, op_name, label or op_name)
+    op_name = _resolve_filter_name(op_name)
+    flt = _check(Gimp.DrawableFilter.new(d, op_name, label or op_name), f"création du filtre {op_name}")
     cfg = flt.get_config()
     for key, value in (params or {}).items():
         pspec = cfg.find_property(key)
@@ -1372,7 +1466,7 @@ def op_filter_apply(p):
         flt = _apply_filter(d, p["name"], p.get("params"), p.get("label"), p.get("opacity", 100.0),
                             p.get("mode"), bool(p.get("non_destructive", False)))
     info = _describe_layer(_layer(image, p))
-    info["filter"] = p["name"]
+    info["filter"] = flt.get_operation_name()  # peut différer du nom demandé (équivalent GIMP)
     if p.get("non_destructive"):
         info["filter_id"] = flt.get_id()
     return info
