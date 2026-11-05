@@ -1,6 +1,6 @@
 [project]
 name = "pinceau-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Serveur MCP pour piloter GIMP 3.2 : calques, sélections, peinture, filtres, photomontage"
 requires-python = ">=3.10"
 dependencies = ["mcp>=1.2"]
