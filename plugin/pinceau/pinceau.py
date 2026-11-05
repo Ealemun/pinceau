@@ -181,6 +181,9 @@ class Pinceau(Gimp.PlugIn):
 
     def run(self, procedure, config, run_data):
         """Point d'entrée : démarre le serveur et bloque sur la boucle GLib."""
+        # Le plugin gère lui-même les erreurs des procédures GIMP : elles sont
+        # renvoyées au client MCP au lieu d'ouvrir une fenêtre d'erreur dans GIMP.
+        self.set_pdb_error_handler(Gimp.PDBErrorHandler.PLUGIN)
         port = int(os.environ.get("PINCEAU_PORT", DEFAULT_PORT))
         server = PinceauServer(port)
         try:
