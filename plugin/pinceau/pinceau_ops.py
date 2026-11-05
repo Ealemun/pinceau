@@ -29,7 +29,7 @@ gi.require_version("Gimp", "3.0")
 gi.require_version("Gegl", "0.4")
 from gi.repository import Gegl, Gimp, Gio, GLib, GObject  # noqa: E402
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 SERVER = None  # renseigné par pinceau.py (pour un arrêt depuis run_python)
 
 # État partagé entre les appels : image "courante" et espace de noms Python
@@ -241,6 +241,19 @@ def _image_paths(image):
     return []
 
 
+def _ensure_rgb(image):
+    """Convertit une image en niveaux de gris ou indexée en RVB.
+
+    Le travail graphique (couleurs, dégradés, montage) se fait en RVB ; GIMP
+    refuse aussi d'insérer un calque d'un type dans une image d'un autre type.
+    Renvoie True si une conversion a eu lieu.
+    """
+    if image.get_base_type() != Gimp.ImageBaseType.RGB:
+        _check(image.convert_rgb(), "conversion en RVB")
+        return True
+    return False
+
+
 def _set_current(image):
     STATE["image_id"] = image.get_id()
 
@@ -421,7 +434,7 @@ def op_snapshot(p):
     if p.get("layer_id") is not None or p.get("layer_name"):
         # Aperçu d'un seul calque : on le copie dans une image temporaire
         layer = _layer(image, p)
-        tmp = Gimp.Image.new(layer.get_width(), layer.get_height(), Gimp.ImageBaseType.RGB)
+        tmp = Gimp.Image.new(layer.get_width(), layer.get_height(), image.get_base_type())
         try:
             copy = Gimp.Layer.new_from_drawable(layer, tmp)
             _check(tmp.insert_layer(copy, None, 0), "insert_layer")
@@ -495,12 +508,16 @@ def op_image_open(p):
         _err(f"fichier introuvable : {path}")
     image = Gimp.file_load(Gimp.RunMode.NONINTERACTIVE, Gio.File.new_for_path(path))
     if image is None:
-        _err(f"GIMP n'a pas pu ouvrir {path}")
+        _err(f"GIMP n'a pas pu ouvrir {path} : {Gimp.get_pdb().get_last_error()}")
+    converted = _ensure_rgb(image)  # gris ou indexé -> RVB pour pouvoir tout faire
+    image.clean_all()  # la conversion ne doit pas marquer l'image comme modifiée
     if p.get("display", True):
         Gimp.Display.new(image)
     _set_current(image)
     Gimp.displays_flush()
-    return _describe_image(image)
+    info = _describe_image(image)
+    info["converted_to_rgb"] = converted
+    return info
 
 
 def op_image_place(p):
@@ -509,10 +526,23 @@ def op_image_place(p):
     path = os.path.expanduser(p["path"])
     if not os.path.isfile(path):
         _err(f"fichier introuvable : {path}")
+    # On charge le fichier comme image séparée, on l'aplatit et on la convertit
+    # en RVB, puis on copie le résultat dans l'image cible. Ça évite les refus de
+    # GIMP quand les types diffèrent (photo en niveaux de gris, PNG indexé, GIF...).
+    src = Gimp.file_load(Gimp.RunMode.NONINTERACTIVE, Gio.File.new_for_path(path))
+    if src is None:
+        _err(f"GIMP n'a pas pu charger {path} : {Gimp.get_pdb().get_last_error()}")
     with _undo(image):
-        layer = Gimp.file_load_layer(Gimp.RunMode.NONINTERACTIVE, image, Gio.File.new_for_path(path))
-        if layer is None:
-            _err(f"GIMP n'a pas pu charger {path}")
+        try:
+            _ensure_rgb(src)
+            layers = src.get_layers()
+            source = layers[0] if len(layers) == 1 else _check(
+                src.merge_visible_layers(Gimp.MergeType.CLIP_TO_IMAGE), "fusion des calques du fichier")
+            _ensure_rgb(image)  # la cible doit aussi être en RVB
+            layer = _check(Gimp.Layer.new_from_drawable(source, image), "copie du calque")
+            layer.set_name(os.path.splitext(os.path.basename(path))[0])
+        finally:
+            src.delete()
         parent = _layer(image, p, "parent_id", "parent_name", required=False) if (p.get("parent_id") or p.get("parent_name")) else None
         _check(image.insert_layer(layer, parent, int(p.get("position", 0))), "insert_layer")
         if p.get("name"):
