@@ -90,6 +90,25 @@ def main():
     step("pick_color", lambda: bridge.call("pick_color", image_id=image_id, x=350, y=300))
     step("histogram", lambda: bridge.call("histogram", image_id=image_id, layer_name="Formes"))
     step("filter_search", lambda: bridge.call("filter_search", query="shadow"))
+
+    # Filtre masqué par GIMP : doit être remplacé automatiquement par gimp:threshold
+    def masked_filter_replaced():
+        bridge.call("layer_duplicate", image_id=image_id, layer_name="Formes", name="Seuil")
+        res = bridge.call("filter_apply", image_id=image_id, layer_name="Seuil", name="gegl:threshold")
+        assert res["filter"] == "gimp:threshold", res["filter"]
+        bridge.call("layer_delete", image_id=image_id, layer_name="Seuil")
+    step("filtre masqué remplacé", masked_filter_replaced)
+
+    # Filtre masqué sans équivalent : doit renvoyer une erreur claire, sans fenêtre dans GIMP
+    def masked_filter_refused():
+        try:
+            bridge.call("filter_apply", image_id=image_id, layer_name="Formes", name="gegl:linear-gradient")
+        except bridge.PinceauError as exc:
+            assert "gimp_gradient" in str(exc), str(exc)
+            return
+        raise AssertionError("le filtre masqué aurait dû être refusé")
+    step("filtre masqué refusé proprement", masked_filter_refused)
+    step("filter_describe gimp:levels", lambda: bridge.call("filter_describe", image_id=image_id, name="gimp:levels"))
     step("filter_describe", lambda: bridge.call("filter_describe", name="gegl:dropshadow"))
     step("pdb_search", lambda: bridge.call("pdb_search", query="gimp-image-get-width"))
     step("pdb_call", lambda: bridge.call("pdb_call", name="gimp-image-get-width", args={"image": image_id}))
