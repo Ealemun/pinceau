@@ -781,10 +781,24 @@ def op_layer_move(p):
 
 
 def op_layer_merge_down(p):
+    """Fusionne un calque avec celui du dessous (les deux doivent être visibles)."""
     image = _image(p)
     layer = _layer(image, p)
+    # GIMP refuse de fusionner un calque invisible, ou sur un calque invisible :
+    # on le signale clairement plutôt que de laisser échouer la procédure.
+    parent = layer.get_parent()
+    siblings = parent.get_children() if parent is not None else image.get_layers()
+    index = image.get_item_position(layer)
+    if index + 1 >= len(siblings):
+        _err(f"« {layer.get_name()} » est le calque le plus bas de sa pile : rien à fusionner dessous")
+    below = siblings[index + 1]
+    hidden = [l.get_name() for l in (layer, below) if not l.get_visible()]
+    if hidden:
+        _err("fusion impossible, calque(s) invisible(s) : " + ", ".join(f"« {n} »" for n in hidden)
+             + ". Rends-les visibles avec gimp_layer_set visible=true, puis recommence.")
     with _undo(image):
-        merged = image.merge_down(layer, _enum(Gimp.MergeType, p.get("merge_type"), Gimp.MergeType.EXPAND_AS_NECESSARY))
+        merged = _check(image.merge_down(layer, _enum(Gimp.MergeType, p.get("merge_type"),
+                                                     Gimp.MergeType.EXPAND_AS_NECESSARY)), "merge_down")
     return _describe_layer(merged)
 
 
