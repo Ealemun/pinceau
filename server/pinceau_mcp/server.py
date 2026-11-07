@@ -565,6 +565,33 @@ def gimp_pdb_call(name: str, args: Optional[dict] = None) -> str:
 
 
 @mcp.tool()
+def gimp_dessin(ops: list, image_id: Optional[int] = None, layer_id: Optional[int] = None,
+                layer_name: Optional[str] = None) -> str:
+    """Appelle le moteur de dessin préchargé (dessin.py) sans écrire de Python.
+    ops = [{"fn": "camera", "args": {"cx": 600, "cy": 500, "rotation": 35}},
+           {"fn": "ellipsoide", "args": {"nom": "crane", "centre": [0, 0, 0], "rayons": [60, 50, 55]},
+            "as": "tete"},
+           {"fn": "oeil", "args": {"tete": "$tete", "lon": -25, "taille": 20}}]
+    - fn : fonction du moteur (liste et signatures : gimp_dessin_aide) ;
+    - args : arguments nommés ; le calque cible (layer_id / layer_name, sinon le calque
+      sélectionné) est passé automatiquement au paramètre lay ; "@Nom" désigne un autre calque ;
+    - as : mémorise le résultat ; "$nom", "$nom.cle" ou "$nom.0" le réutilisent ensuite,
+      y compris dans un appel suivant de cet outil.
+    Toute la liste forme une seule étape d'annulation. Les résultats volumineux (silhouettes,
+    listes de points) sont résumés dans la réponse mais restent complets dans les variables.
+    Pour cadrer() (qui prend une fonction Python), utilise gimp_run_python."""
+    return _j(bridge.call("dessin", **_clean({"ops": ops, "image_id": image_id, "layer_id": layer_id,
+                                               "layer_name": layer_name})))
+
+
+@mcp.tool()
+def gimp_dessin_aide(fn: Optional[str] = None) -> str:
+    """Fonctions du moteur de dessin avec leur signature et la première ligne de leur doc,
+    plus les variables mémorisées. Avec fn : la doc complète d'une seule fonction."""
+    return _j(bridge.call("dessin_aide", **_clean({"fn": fn})))
+
+
+@mcp.tool()
 def gimp_run_python(code: str, mode: str = "exec") -> str:
     """Exécute du Python directement dans le processus GIMP (API GObject Introspection de GIMP 3.2).
     Espace de noms persistant avec Gimp, Gegl, Gio, GLib, GObject, pdb, image(), layer(image, ...),

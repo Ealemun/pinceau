@@ -19,6 +19,7 @@ Compatibilité : GIMP 3.2 (quelques repliques pour 3.0 via getattr).
 
 import base64
 import contextlib
+import inspect
 import io
 import os
 import tempfile
@@ -1723,12 +1724,119 @@ def _charger_dessin(ns):
     chemin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dessin.py")
     if not os.path.exists(chemin):
         return
+    avant = set(ns)
     try:
         with open(chemin, encoding="utf-8") as f:
             exec(compile(f.read(), chemin, "exec"), ns)  # noqa: S102
         ns.pop("result", None)
     except Exception as e:  # noqa: BLE001
         ns["DESSIN_ERREUR"] = repr(e)
+    # Fonctions publiques ajoutées par le moteur : seules celles-ci sont appelables par
+    # l'outil dessin (pas d'accès au reste de l'espace de noms depuis du JSON).
+    ns["DESSIN_FONCTIONS"] = sorted(k for k in set(ns) - avant
+                                    if not k.startswith("_") and inspect.isfunction(ns[k]))
+
+
+def _valeur_dessin(v, ns, image):
+    """Résout un argument JSON pour le moteur : "$nom" = variable mémorisée (via "as"),
+    "$nom.cle" ou "$nom.0" = élément d'un dictionnaire ou d'une liste mémorisés,
+    "@Calque" = le calque de ce nom ; listes et dictionnaires sont résolus récursivement."""
+    if isinstance(v, str) and v.startswith("$") and len(v) > 1:
+        nom, *chemin = v[1:].split(".")
+        if nom not in ns.get("DESSIN_VARS", {}):
+            _err(f"variable « {nom} » inconnue : mémorise-la d'abord avec \"as\": \"{nom}\"")
+        val = ns["DESSIN_VARS"][nom]
+        for cle in chemin:
+            val = val[int(cle)] if isinstance(val, (list, tuple)) else val[cle]
+        return val
+    if isinstance(v, str) and v.startswith("@") and len(v) > 1:
+        return _layer(image, {"layer_name": v[1:]})
+    if isinstance(v, list):
+        return [_valeur_dessin(x, ns, image) for x in v]
+    if isinstance(v, dict):
+        return {k: _valeur_dessin(x, ns, image) for k, x in v.items()}
+    return v
+
+
+def _resume(v, profondeur=0):
+    """Version JSON compacte d'un résultat du moteur (les volumes et longues listes de
+    points sont résumés, pour ne pas inonder la réponse)."""
+    if isinstance(v, (int, float, str, bool)) or v is None:
+        return v
+    if isinstance(v, (list, tuple)):
+        if len(v) > 12 or profondeur > 2:
+            return {"type": "liste", "longueur": len(v)}
+        return [_resume(x, profondeur + 1) for x in v]
+    if isinstance(v, dict):
+        if profondeur > 1:
+            return {"type": "dict", "cles": list(v)[:20]}
+        return {k: _resume(x, profondeur + 1) for k, x in list(v.items())[:20]}
+    return _gvalue_to_json(v)
+
+
+def op_dessin(p):
+    """Exécute une liste d'appels au moteur de dessin, sans écrire de Python.
+
+    ops : [{"fn": "trait", "args": {...}, "as": "nom"}, ...]
+      - fn   : une fonction publique de dessin.py (voir dessin_aide) ;
+      - args : ses arguments nommés ; le calque cible est passé automatiquement au
+               paramètre `lay` s'il n'est pas donné ("@Nom" pour un autre calque) ;
+      - as   : mémorise le résultat sous ce nom, réutilisable ensuite avec "$nom"
+               (et "$nom.cle", "$nom.0") dans les appels suivants, y compris d'un appel
+               d'outil à l'autre.
+    Tous les appels forment une seule étape d'annulation. En cas d'erreur, rien n'est
+    annulé automatiquement : la réponse indique l'appel fautif et ceux déjà exécutés.
+    """
+    ns = _namespace()
+    if ns.get("DESSIN_ERREUR"):
+        _err(f"le moteur de dessin n'a pas pu être chargé : {ns['DESSIN_ERREUR']}")
+    fonctions = set(ns.get("DESSIN_FONCTIONS", []))
+    if not fonctions:
+        _err("moteur de dessin absent : dessin.py doit se trouver à côté de pinceau_ops.py")
+    image = _image(p)
+    calque = _layer(image, p)
+    ns.setdefault("DESSIN_VARS", {})
+    resultats = []
+    with _undo(image):
+        for i, op in enumerate(p.get("ops") or []):
+            nom = op.get("fn")
+            if nom not in fonctions:
+                _err(f"appel {i} : « {nom} » n'est pas une fonction du moteur ; "
+                     f"fonctions : {', '.join(sorted(fonctions))}")
+            fn = ns[nom]
+            try:
+                args = _valeur_dessin(op.get("args") or {}, ns, image)
+                if "lay" in inspect.signature(fn).parameters and "lay" not in args:
+                    args["lay"] = calque
+                valeur = fn(**args)
+            except ValueError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                _err(f"appel {i} ({nom}) : {type(exc).__name__}: {exc} ; "
+                     f"{len(resultats)} appel(s) déjà exécuté(s)")
+            if op.get("as"):
+                ns["DESSIN_VARS"][op["as"]] = valeur
+            resultats.append({"fn": nom, "resultat": _resume(valeur)})
+    return {"executes": len(resultats), "resultats": resultats,
+            "variables": sorted(ns["DESSIN_VARS"])}
+
+
+def op_dessin_aide(p):
+    """Signatures et première ligne de doc des fonctions du moteur (fn optionnel : une seule,
+    avec sa doc complète)."""
+    ns = _namespace()
+    if ns.get("DESSIN_ERREUR"):
+        _err(f"le moteur de dessin n'a pas pu être chargé : {ns['DESSIN_ERREUR']}")
+    noms = [p["fn"]] if p.get("fn") else ns.get("DESSIN_FONCTIONS", [])
+    aide = []
+    for nom in noms:
+        if nom not in ns.get("DESSIN_FONCTIONS", []):
+            _err(f"« {nom} » n'est pas une fonction du moteur")
+        fn = ns[nom]
+        doc = inspect.getdoc(fn) or ""
+        aide.append({"fn": nom, "signature": f"{nom}{inspect.signature(fn)}",
+                     "doc": doc if p.get("fn") else doc.split("\n")[0]})
+    return {"fonctions": aide, "variables": sorted(ns.get("DESSIN_VARS", {}))}
 
 
 def op_run_python(p):
