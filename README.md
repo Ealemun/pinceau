@@ -95,6 +95,16 @@ Conventions : `image_id` optionnel (image courante par défaut), `layer_id` ou `
 optionnels (calque sélectionné par défaut), `target="mask"` pour agir sur le masque d'un calque,
 couleurs en `#rrggbb` / `#rrggbbaa` ou `[r, g, b, a]`, coordonnées en pixels.
 
+### Moteur de dessin préchargé
+
+`plugin/pinceau/dessin.py` est chargé automatiquement dans l'espace de noms de `gimp_run_python` :
+construction en volumes 3D vus par une caméra (`camera`, `ellipsoide`, `cylindre`, `boite`, `scene`),
+trait à épaisseur variable (`courbe2d`, `trait`, `bord_fourrure`), yeux et membres construits
+(`oeil`, `membre_quadrupede`, `patte`, `pied`). C'est le moteur des skills de dessin
+(`dessin-pinceau/scripts/volumes3d.py`, dont ce fichier est une copie). Si son chargement échoue,
+`run_python` fonctionne quand même et l'erreur est lisible avec
+`gimp_run_python mode="eval" code="DESSIN_ERREUR"`.
+
 ## Dépannage
 
 - *« Fichier pinceau-server.json introuvable »* : le serveur n'est pas démarré dans GIMP, ou

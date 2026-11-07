@@ -1619,7 +1619,24 @@ def _namespace():
             "layer": lambda image, **kw: _layer(image, kw),
             "color": _color,
         }
+        _charger_dessin(PY_NAMESPACE)
     return PY_NAMESPACE
+
+
+def _charger_dessin(ns):
+    """Précharge le moteur de dessin (dessin.py, à côté de ce fichier) dans l'espace de
+    noms de run_python : camera(), oeil(), patte(), trait()… sont disponibles dès le premier
+    appel, sans que le client ait à envoyer le module. Une erreur de chargement n'empêche pas
+    run_python de fonctionner : elle est gardée dans DESSIN_ERREUR pour le diagnostic."""
+    chemin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dessin.py")
+    if not os.path.exists(chemin):
+        return
+    try:
+        with open(chemin, encoding="utf-8") as f:
+            exec(compile(f.read(), chemin, "exec"), ns)  # noqa: S102
+        ns.pop("result", None)
+    except Exception as e:  # noqa: BLE001
+        ns["DESSIN_ERREUR"] = repr(e)
 
 
 def op_run_python(p):
