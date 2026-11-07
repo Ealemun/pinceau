@@ -15,7 +15,7 @@ opération GEGL, et exécution de Python directement dans GIMP.
 ## Architecture
 
 ```
-Client MCP ──stdio──▶ server/pinceau_mcp (41 outils, Python + SDK mcp)
+Client MCP ──stdio──▶ server/pinceau_mcp (43 outils, Python + SDK mcp)
                               │  JSON sur TCP 127.0.0.1:9879, token aléatoire
                               ▼
                      plugin/pinceau (plugin GIMP 3, PyGObject)
@@ -83,12 +83,13 @@ pinceau, texte, masque, chemin, photomontage, PDB, Python) et dépose les aperç
 
 | Couche | Outils |
 |---|---|
-| Session et vision | `gimp_status`, `gimp_image_info`, `gimp_set_current_image`, `gimp_snapshot` (image, calque ou région), `gimp_pick_color`, `gimp_histogram` |
+| Session et vision | `gimp_status`, `gimp_image_info` (avec les brosses de matière installées), `gimp_set_current_image`, `gimp_snapshot` (image, calque ou région, réduit ou à l'échelle exacte avec `scale`), `gimp_pick_color`, `gimp_histogram` |
 | Fichiers | `gimp_image_new`, `gimp_image_open`, `gimp_image_place` (photomontage), `gimp_image_save_xcf`, `gimp_image_export`, `gimp_image_close`, `gimp_image_transform` (scale, canevas, crop, rotate, flip, flatten, merge) |
 | Calques | `gimp_layer_create`, `gimp_group_create`, `gimp_layer_set`, `gimp_layer_edit` (duplicate, delete, merge_down, move), `gimp_layer_transform` (scale, rotate, flip, perspective, shear), `gimp_layer_align`, `gimp_mask` |
 | Sélections et chemins | `gimp_select` (rectangle, ellipse, polygon, contiguous, color, path, layer_alpha...), `gimp_selection_modify`, `gimp_selection_channel`, `gimp_path_create`, `gimp_stroke` |
-| Peinture et texte | `gimp_fill`, `gimp_bucket_fill`, `gimp_gradient`, `gimp_paint` (paintbrush, pencil, airbrush, eraser, smudge, dodge, burn, clone), `gimp_text`, `gimp_text_edit`, `gimp_resources` |
+| Peinture et texte | `gimp_fill`, `gimp_bucket_fill`, `gimp_gradient`, `gimp_paint` (paintbrush, pencil, airbrush, eraser, smudge, dodge, burn, clone ; `sizes` pour une épaisseur par point), `gimp_text`, `gimp_text_edit`, `gimp_resources` |
 | Couleur et filtres | `gimp_adjust` (12 ajustements), `gimp_filter_search`, `gimp_filter_describe`, `gimp_filter_apply` (destructif ou non), `gimp_layer_effects` |
+| Dessin | `gimp_dessin` (appels JSON au moteur de dessin préchargé), `gimp_dessin_aide` (fonctions et signatures) |
 | Accès générique | `gimp_pdb_search`, `gimp_pdb_describe`, `gimp_pdb_call`, `gimp_run_python` |
 
 Conventions : `image_id` optionnel (image courante par défaut), `layer_id` ou `layer_name`
@@ -104,6 +105,11 @@ trait à épaisseur variable (`courbe2d`, `trait`, `bord_fourrure`), yeux et mem
 (`dessin-pinceau/scripts/volumes3d.py`, dont ce fichier est une copie). Si son chargement échoue,
 `run_python` fonctionne quand même et l'erreur est lisible avec
 `gimp_run_python mode="eval" code="DESSIN_ERREUR"`.
+
+`gimp_dessin` appelle ces fonctions sans écrire de Python : une liste
+`[{"fn": "trait", "args": {...}, "as": "nom"}, ...]`, exécutée en une seule étape d'annulation.
+Le calque cible est passé automatiquement au paramètre `lay`, `"@Calque"` désigne un autre
+calque, et un résultat mémorisé avec `"as"` se réutilise avec `"$nom"` (ou `"$nom.cle"`).
 
 ## Dépannage
 

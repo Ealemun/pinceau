@@ -41,7 +41,8 @@ def step(name, fn):
 
 def save_snapshot(name, **kw):
     """Sauvegarde un aperçu dans tests/output pour contrôle visuel."""
-    data = bridge.call("snapshot", max_size=800, **kw)
+    kw.setdefault("max_size", 800)
+    data = bridge.call("snapshot", **kw)
     path = os.path.join(OUT, name)
     with open(path, "wb") as f:
         f.write(base64.b64decode(data["png_base64"]))
@@ -126,6 +127,34 @@ def main():
     step("select contiguous", lambda: bridge.call("select", image_id=image_id, layer_name="Fond", shape="contiguous",
                                                   x=5, y=5, threshold=0.2))
     step("select none 2", lambda: bridge.call("select", image_id=image_id, shape="none"))
+
+    # --- Nouveautés 0.3 : moteur de dessin, tailles par point, échelle, brosses
+    step("paint sizes", lambda: bridge.call("paint", image_id=image_id, layer_name="Formes", color="#202020",
+                                            points=[[100, 80], [140, 70], [180, 66], [220, 70], [260, 80]],
+                                            sizes=[2, 8, 14, 8, 2], hardness=0.9))
+    step("burn", lambda: bridge.call("paint", image_id=image_id, layer_name="Fond", tool="burn",
+                                     points=[[700, 80], [760, 120]], size=40, exposure=30, range="shadows"))
+    step("dessin_aide", lambda: bridge.call("dessin_aide"))
+
+    def moteur_dessin():
+        bridge.call("layer_create", image_id=image_id, name="Construction")
+        res = bridge.call("dessin", image_id=image_id, layer_name="Construction", ops=[
+            {"fn": "camera", "args": {"cx": 650, "cy": 200, "rotation": 35, "plongee": 15}},
+            {"fn": "ellipsoide", "args": {"nom": "crane", "centre": [0, 0, 0], "rayons": [60, 50, 55]},
+             "as": "tete"},
+            {"fn": "dessiner", "args": {"vol": "$tete", "size": 2.0}},
+        ])
+        assert res["executes"] == 3 and "tete" in res["variables"], res
+    step("dessin (moteur préchargé)", moteur_dessin)
+    step("snapshot scale 2", lambda: save_snapshot("snapshot_x2.png", image_id=image_id, scale=2,
+                                                   region={"x": 560, "y": 120, "width": 180, "height": 160}))
+
+    def brosses():
+        info = bridge.call("image_info", image_id=image_id)
+        assert "brosses" in info, info.keys()
+        print("     brosses de matière :", len(info["brosses"]["texturees"]),
+              "| craie :", info["brosses"]["craie"], "| fusain :", info["brosses"]["fusain"])
+    step("image_info brosses", brosses)
 
     # --- Vision et sauvegarde --------------------------------------------
     step("snapshot composite", lambda: save_snapshot("snapshot.png", image_id=image_id))
