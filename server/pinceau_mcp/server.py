@@ -70,7 +70,9 @@ def gimp_status() -> str:
 @mcp.tool()
 def gimp_image_info(image_id: Optional[int] = None) -> str:
     """Description complète d'une image : taille, sélection, calques (arbre avec id, nom, type,
-    position, opacité, mode, visibilité, masque), chemins. Les ids servent aux autres outils."""
+    position, opacité, mode, visibilité, masque), chemins, et `brosses` : brosses de matière
+    installées (texturees, plus craie / fusain / huile_acrylique présents ou non) pour choisir
+    la texture d'un rendu peint. Les ids servent aux autres outils."""
     return _j(bridge.call("image_info", **_clean({"image_id": image_id})))
 
 

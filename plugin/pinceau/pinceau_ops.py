@@ -437,9 +437,35 @@ def op_status(p):
     }
 
 
+# Mots-clés des brosses de matière livrées avec GIMP (craie, fusain, huile, acrylique...)
+_MOTS_MATIERE = ("chalk", "charcoal", "acrylic", "oil", "pencil", "sponge", "bristle",
+                 "texture", "grunge", "splat", "smudge", "cell", "hatch", "grass", "hair")
+
+
+def _brosses_disponibles():
+    """Résumé des brosses installées utiles pour la peinture : brosses texturées (non
+    générées, donc avec une vraie matière) et présence des familles craie / fusain."""
+    texturees = []
+    for brush in Gimp.brushes_get_list(""):
+        try:
+            generee = brush.is_generated()
+        except Exception:  # noqa: BLE001
+            generee = False
+        nom = brush.get_name()
+        if not generee and any(m in nom.lower() for m in _MOTS_MATIERE):
+            texturees.append(nom)
+    noms = " ".join(texturees).lower()
+    return {"texturees": sorted(texturees),
+            "craie": "chalk" in noms, "fusain": "charcoal" in noms,
+            "huile_acrylique": "oil" in noms or "acrylic" in noms}
+
+
 def op_image_info(p):
-    """Description complète d'une image (calques, sélection, chemins)."""
-    return _describe_image(_image(p))
+    """Description complète d'une image (calques, sélection, chemins) et brosses de matière
+    disponibles (pour choisir la texture d'un rendu peint)."""
+    info = _describe_image(_image(p))
+    info["brosses"] = _brosses_disponibles()
+    return info
 
 
 def op_set_current_image(p):
