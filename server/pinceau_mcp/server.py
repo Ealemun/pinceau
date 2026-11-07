@@ -416,19 +416,25 @@ def gimp_gradient(x1: float, y1: float, x2: float, y2: float, color_from: str = 
 
 @mcp.tool()
 def gimp_paint(points: list, tool: str = "paintbrush", color: Optional[str] = None, size: float = 20.0,
-               hardness: float = 0.5, opacity: float = 100.0, brush: Optional[str] = None, mode: str = "normal",
-               pressure: float = 50.0, force: float = 0.5, image_id: Optional[int] = None,
+               sizes: Optional[list] = None, hardness: float = 0.5, opacity: float = 100.0,
+               brush: Optional[str] = None, mode: str = "normal", pressure: float = 50.0, force: float = 0.5,
+               exposure: float = 50.0, range: Optional[str] = None, image_id: Optional[int] = None,
                layer_id: Optional[int] = None, layer_name: Optional[str] = None, target: Optional[str] = None,
                source_layer_id: Optional[int] = None, source_x: Optional[float] = None,
                source_y: Optional[float] = None) -> str:
     """Coup de pinceau libre le long de points = [[x,y], ...] (un seul point = une touche).
     tool : paintbrush (bords doux selon hardness), pencil (bords nets), airbrush (pressure),
-    eraser (efface vers transparent), smudge (étale, pressure), dodge, burn,
-    clone (copie depuis source_layer_id à partir de (source_x, source_y)).
+    eraser (efface vers transparent), smudge (étale, pressure), dodge (éclaircit), burn (assombrit)
+    avec exposure 0-100 et range shadows|midtones|highlights, clone (copie depuis
+    source_layer_id à partir de (source_x, source_y)).
+    sizes : une taille de brosse par point (même longueur que points) pour un trait à épaisseur
+    variable (fin-épais-fin, pointe qui se perd) en un seul appel et une seule annulation ;
+    remplace size. Garde des points serrés (≤ 15 px) pour des transitions douces.
     brush : nom d'une brosse GIMP (gimp_resources kind="brushes") ; size en pixels ; hardness 0-1."""
     return _j(bridge.call("paint", **_clean({"points": points, "tool": tool, "color": color, "size": size,
-                                              "hardness": hardness, "opacity": opacity, "brush": brush, "mode": mode,
-                                              "pressure": pressure, "force": force, "image_id": image_id,
+                                              "sizes": sizes, "hardness": hardness, "opacity": opacity,
+                                              "brush": brush, "mode": mode, "pressure": pressure, "force": force,
+                                              "exposure": exposure, "range": range, "image_id": image_id,
                                               "layer_id": layer_id, "layer_name": layer_name, "target": target,
                                               "source_layer_id": source_layer_id, "source_x": source_x,
                                               "source_y": source_y})))

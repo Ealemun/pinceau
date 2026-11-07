@@ -1212,16 +1212,73 @@ def op_gradient(p):
     return _describe_layer(_layer(image, p))
 
 
+def _segments_par_taille(points, sizes):
+    """Découpe une polyligne en morceaux de taille de brosse constante.
+
+    points : [[x, y], ...] ; sizes : une taille par point. Le segment i (du point i au
+    point i+1) prend la moyenne des deux tailles, arrondie au demi-pixel ; les segments
+    consécutifs de même taille sont regroupés en un seul geste, pour éviter les
+    « perles » d'opacité aux raccords. Renvoie [(liste plate x, y, ..., taille), ...].
+    """
+    if len(sizes) != len(points):
+        _err(f"sizes doit avoir une valeur par point ({len(points)} points, {len(sizes)} tailles)")
+    groupes, courant, taille_courante = [], [points[0]], None
+    for i in range(len(points) - 1):
+        # moyenne des deux tailles arrondie au demi-pixel : round(a + b) / 2
+        taille = max(0.5, round(float(sizes[i]) + float(sizes[i + 1])) / 2)
+        if taille_courante is not None and taille != taille_courante:
+            groupes.append((courant, taille_courante))
+            courant = [points[i]]  # le morceau suivant repart du point de raccord
+        courant.append(points[i + 1])
+        taille_courante = taille
+    groupes.append((courant, taille_courante))
+    return [([float(v) for pt in g for v in pt], t) for g, t in groupes]
+
+
 def op_paint(p):
-    """Coup de pinceau libre : tool = paintbrush|pencil|airbrush|eraser|smudge|dodge|burn|clone."""
+    """Coup de pinceau libre : tool = paintbrush|pencil|airbrush|eraser|smudge|dodge|burn|clone.
+    sizes (optionnel) : une taille de brosse par point, pour un trait à épaisseur variable
+    tracé en un seul appel (une seule étape d'annulation)."""
     image = _image(p)
     d = _drawable(image, p)
-    pts = [float(v) for pair in p["points"] for v in pair]
-    if len(pts) < 2:
+    points = [[float(pt[0]), float(pt[1])] for pt in p["points"]]
+    if not points:
         _err("points doit contenir au moins un [x, y]")
-    if len(pts) == 2:  # un seul point : on double pour obtenir une touche
-        pts = pts + pts
+    sizes = p.get("sizes")
+    if len(points) == 1:  # un seul point : on double pour obtenir une touche
+        points = points * 2
+        sizes = sizes * 2 if sizes else None
+    if sizes:
+        morceaux = _segments_par_taille(points, sizes)
+    else:
+        morceaux = [([v for pt in points for v in pt], float(p.get("size", 20.0)))]
     tool = p.get("tool", "paintbrush")
+
+    def tracer(flat):
+        """Un geste de l'outil choisi le long de la polyligne plate [x0, y0, x1, y1, ...]."""
+        if tool == "paintbrush":
+            _check(Gimp.paintbrush_default(d, flat), "paintbrush_default")
+        elif tool == "pencil":
+            _check(Gimp.pencil(d, flat), "pencil")
+        elif tool == "airbrush":
+            _check(Gimp.airbrush(d, float(p.get("pressure", 50.0)), flat), "airbrush")
+        elif tool == "eraser":
+            _check(Gimp.eraser_default(d, flat), "eraser_default")
+        elif tool == "smudge":
+            _check(Gimp.smudge(d, float(p.get("pressure", 50.0)), flat), "smudge")
+        elif tool in ("dodge", "burn"):
+            # exposure 0-100 ; range = shadows | midtones | highlights
+            kind = Gimp.DodgeBurnType.DODGE if tool == "dodge" else Gimp.DodgeBurnType.BURN
+            _check(Gimp.dodgeburn(d, float(p.get("exposure", 50.0)), kind,
+                                  _enum(Gimp.TransferMode, p.get("range"), Gimp.TransferMode.MIDTONES), flat),
+                   "dodgeburn")
+        elif tool == "clone":
+            src = _layer(image, p, "source_layer_id", "source_layer_name")
+            _check(Gimp.clone(d, src, Gimp.CloneType.IMAGE, float(p["source_x"]), float(p["source_y"]), flat),
+                   "clone")
+        else:
+            _err("tool inconnu")
+
     with _undo(image):
         Gimp.context_push()
         try:
@@ -1230,7 +1287,6 @@ def op_paint(p):
                 if brush is None:
                     _err(f"brosse « {p['brush']} » introuvable (voir resources_list)")
                 Gimp.context_set_brush(brush)
-            Gimp.context_set_brush_size(float(p.get("size", 20.0)))
             Gimp.context_set_brush_hardness(float(p.get("hardness", 0.5)))
             Gimp.context_set_brush_force(float(p.get("force", 0.5)))
             Gimp.context_set_brush_aspect_ratio(float(p.get("aspect", 0.0)))
@@ -1239,26 +1295,14 @@ def op_paint(p):
             Gimp.context_set_paint_mode(_enum(Gimp.LayerMode, p.get("mode"), Gimp.LayerMode.NORMAL))
             if p.get("color"):
                 Gimp.context_set_foreground(_color(p["color"]))
-            if tool == "paintbrush":
-                _check(Gimp.paintbrush_default(d, pts), "paintbrush_default")
-            elif tool == "pencil":
-                _check(Gimp.pencil(d, pts), "pencil")
-            elif tool == "airbrush":
-                _check(Gimp.airbrush(d, float(p.get("pressure", 50.0)), pts), "airbrush")
-            elif tool == "eraser":
-                _check(Gimp.eraser_default(d, pts), "eraser_default")
-            elif tool == "smudge":
-                _check(Gimp.smudge(d, float(p.get("pressure", 50.0)), pts), "smudge")
-            elif tool in ("dodge", "burn"):
-                _check(Gimp.dodgeburn_default(d, pts), "dodgeburn_default")
-            elif tool == "clone":
-                src = _layer(image, p, "source_layer_id", "source_layer_name")
-                _check(Gimp.clone(d, src, Gimp.CloneType.IMAGE, float(p["source_x"]), float(p["source_y"]), pts), "clone")
-            else:
-                _err("tool inconnu")
+            for flat, taille in morceaux:
+                Gimp.context_set_brush_size(taille)
+                tracer(flat)
         finally:
             Gimp.context_pop()
-    return _describe_layer(_layer(image, p))
+    info = _describe_layer(_layer(image, p))
+    info["gestes"] = len(morceaux)  # nombre de morceaux tracés (tous dans une seule annulation)
+    return info
 
 
 def op_text_add(p):
