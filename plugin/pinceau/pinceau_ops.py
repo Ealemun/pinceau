@@ -30,7 +30,7 @@ gi.require_version("Gimp", "3.0")
 gi.require_version("Gegl", "0.4")
 from gi.repository import Gegl, Gimp, Gio, GLib, GObject  # noqa: E402
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 SERVER = None  # renseigné par pinceau.py (pour un arrêt depuis run_python)
 
 # État partagé entre les appels : image "courante" et espace de noms Python
