@@ -35,6 +35,7 @@ SERVER = None  # renseigné par pinceau.py (pour un arrêt depuis run_python)
 # État partagé entre les appels : image "courante" et espace de noms Python
 STATE = {"image_id": None}
 PY_NAMESPACE = None  # créé à la première exécution de run_python
+MAX_SNAPSHOT_SIDE = 4096  # côté maximal d'un aperçu, pour garder des réponses raisonnables
 
 # Classes dont le nom a changé entre GIMP 3.0 et 3.2
 PathClass = getattr(Gimp, "Path", None) or getattr(Gimp, "Vectors", None)
@@ -266,8 +267,14 @@ def _export(image, path):
         _err(f"échec de l'export vers {path}")
 
 
-def _png_bytes_of_image(image, max_size=None, region=None):
-    """Aplatit une COPIE de l'image et renvoie les octets PNG (l'original est intact)."""
+def _png_bytes_of_image(image, max_size=None, region=None, scale=None):
+    """Aplatit une COPIE de l'image et renvoie les octets PNG (l'original est intact).
+
+    max_size : réduit l'aperçu pour que son plus grand côté n'en dépasse pas la valeur.
+    scale    : facteur d'échelle exact (1 = pixels réels, 2 = chaque pixel en 2×2…) ;
+               prioritaire sur max_size. L'agrandissement se fait au plus proche voisin,
+               pour voir les vrais pixels (bords, jonctions, anticrénelage) sans lissage.
+    """
     dup = image.duplicate()
     try:
         if region:
@@ -280,11 +287,25 @@ def _png_bytes_of_image(image, max_size=None, region=None):
         layers = dup.get_layers()
         if layers:
             layers[0].resize_to_image_size()
-        if max_size:
-            w, h = dup.get_width(), dup.get_height()
-            scale = min(1.0, float(max_size) / max(w, h))
-            if scale < 1.0:
-                _check(dup.scale(max(1, int(w * scale)), max(1, int(h * scale))), "scale")
+        w, h = dup.get_width(), dup.get_height()
+        if scale:
+            factor = float(scale)
+            if max(w, h) * factor > MAX_SNAPSHOT_SIDE:
+                _err(f"aperçu trop grand ({int(w * factor)}×{int(h * factor)} px) : "
+                     f"réduis la région ou le facteur scale (max {MAX_SNAPSHOT_SIDE} px de côté)")
+            if factor != 1.0:
+                Gimp.context_push()
+                try:
+                    # Agrandir : plus proche voisin (pixels nets) ; réduire : bonne qualité
+                    Gimp.context_set_interpolation(Gimp.InterpolationType.NONE if factor > 1.0
+                                                   else Gimp.InterpolationType.LOHALO)
+                    _check(dup.scale(max(1, round(w * factor)), max(1, round(h * factor))), "scale")
+                finally:
+                    Gimp.context_pop()
+        elif max_size:
+            factor = min(1.0, float(max_size) / max(w, h))
+            if factor < 1.0:
+                _check(dup.scale(max(1, int(w * factor)), max(1, int(h * factor))), "scale")
         return _png_bytes_via_tempfile(dup)
     finally:
         dup.delete()
@@ -428,7 +449,8 @@ def op_set_current_image(p):
 
 
 def op_snapshot(p):
-    """Aperçu PNG (base64) de l'image composite, d'un calque ou d'une région."""
+    """Aperçu PNG (base64) de l'image composite, d'un calque ou d'une région.
+    scale (1, 2, 3…) donne une échelle exacte ; sinon max_size borne le plus grand côté."""
     image = _image(p)
     max_size = p.get("max_size", 1024)
     if p.get("layer_id") is not None or p.get("layer_name"):
@@ -441,11 +463,11 @@ def op_snapshot(p):
             _check(copy.set_offsets(0, 0), "set_offsets")
             copy.set_visible(True)
             copy.set_opacity(100.0)
-            data = _png_bytes_of_image(tmp, max_size=max_size)
+            data = _png_bytes_of_image(tmp, max_size=max_size, scale=p.get("scale"))
         finally:
             tmp.delete()
     else:
-        data = _png_bytes_of_image(image, max_size=max_size, region=p.get("region"))
+        data = _png_bytes_of_image(image, max_size=max_size, region=p.get("region"), scale=p.get("scale"))
     return {"png_base64": base64.b64encode(data).decode("ascii"), "bytes": len(data)}
 
 

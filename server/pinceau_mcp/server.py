@@ -83,13 +83,16 @@ def gimp_set_current_image(image_id: int) -> str:
 @mcp.tool()
 def gimp_snapshot(image_id: Optional[int] = None, layer_id: Optional[int] = None,
                   layer_name: Optional[str] = None, max_size: int = 1024,
-                  region: Optional[dict] = None) -> Image:
+                  region: Optional[dict] = None, scale: Optional[float] = None) -> Image:
     """Aperçu PNG de l'image composite (par défaut), d'un seul calque (layer_id/layer_name)
-    ou d'une région {"x","y","width","height"}. L'image est réduite à max_size px de côté.
+    ou d'une région {"x","y","width","height"}. Par défaut réduit à max_size px de côté.
+    scale donne une échelle exacte à la place : 1 = pixels réels, 2 ou 3 = agrandi au plus
+    proche voisin (pixels nets), idéal pour contrôler yeux, jonctions et bords sur une région ;
+    un point (u, v) de l'aperçu correspond alors à (x + u/scale, y + v/scale) dans l'image.
     Utilise-le après chaque étape importante pour contrôler visuellement le résultat."""
     result = bridge.call("snapshot", **_clean({"image_id": image_id, "layer_id": layer_id,
                                                  "layer_name": layer_name, "max_size": max_size,
-                                                 "region": region}))
+                                                 "region": region, "scale": scale}))
     return Image(data=base64.b64decode(result["png_base64"]), format="png")
 
 
