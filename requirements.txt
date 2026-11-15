@@ -1,1 +1,4 @@
+# Dépendances du serveur MCP Pinceau (lues par install.py).
+# Ne pas écraser avec un pip freeze : les versions figées de la recherche
+# sont dans recherche/requirements-lock.txt.
 mcp>=1.2

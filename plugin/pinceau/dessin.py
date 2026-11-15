@@ -113,7 +113,7 @@ def _volume(nom, silhouette3d, lignes, centre):
     """Assemble la description d'un volume prête à dessiner."""
     zc = _to_cam(centre)[2]
     return {"nom": nom, "silhouette": _hull([_proj(_to_cam(p)) for p in silhouette3d]),
-            "lignes": lignes, "z": zc, "k": CAM["f"] / zc}
+            "lignes": lignes, "z": zc, "k": CAM["f"] / zc, "surf3d": silhouette3d}
 
 
 def ellipsoide(nom, centre, rayons, rot=(0, 0, 0), anneaux=3, meridiens=2):
@@ -237,19 +237,114 @@ def _largeur(t, profil):
     return 1.0               # constant : ligne claire, construction
 
 
+def _lisser(pts, pas=2.5):
+    """Rend une polyligne lisse et régulière : deux passes de Chaikin (coins arrondis), puis
+    rééchantillonnage tous les `pas` px. C'est ce qui supprime l'aspect saccadé d'une courbe
+    donnée en quelques points."""
+    P = [list(p) for p in pts]
+    for _ in range(2):
+        if len(P) < 3:
+            break
+        Q = [P[0]]
+        for a, b in zip(P[:-1], P[1:]):
+            Q.append([0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]])
+            Q.append([0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]])
+        Q.append(P[-1])
+        P = Q
+    # Rééchantillonnage à pas constant le long de la courbe.
+    out, reste = [P[0]], 0.0
+    for a, b in zip(P[:-1], P[1:]):
+        L = math.hypot(b[0] - a[0], b[1] - a[1])
+        d = pas - reste
+        while d <= L:
+            t = d / L
+            out.append([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t])
+            d += pas
+        reste = L - (d - pas)
+    if math.hypot(out[-1][0] - P[-1][0], out[-1][1] - P[-1][1]) > 0.3:
+        out.append(P[-1])
+    return out
+
+
+def _ruban(pts, largeurs):
+    """Contour fermé d'un trait d'épaisseur variable : bord gauche, embout rond, bord droit
+    à rebours, embout rond. largeurs : diamètre en chaque point."""
+    n = len(pts)
+    gauche, droite = [], []
+    for i in range(n):
+        a, b = pts[max(0, i - 1)], pts[min(n - 1, i + 1)]
+        tx, ty = b[0] - a[0], b[1] - a[1]
+        l = math.hypot(tx, ty) or 1.0
+        nx, ny = -ty / l, tx / l
+        r = largeurs[i] / 2.0
+        gauche.append([pts[i][0] + nx * r, pts[i][1] + ny * r])
+        droite.append([pts[i][0] - nx * r, pts[i][1] - ny * r])
+
+    def embout(c, depart, rayon, sens):
+        # Demi-cercle autour de c, de l'angle `depart` sur 180° (sens = ±1).
+        return [[c[0] + rayon * math.cos(depart + sens * math.pi * k / 6),
+                 c[1] + rayon * math.sin(depart + sens * math.pi * k / 6)] for k in range(1, 6)]
+
+    def angle(p, c):
+        return math.atan2(p[1] - c[1], p[0] - c[0])
+    fin = embout(pts[-1], angle(gauche[-1], pts[-1]), largeurs[-1] / 2.0, -1)
+    deb = embout(pts[0], angle(droite[0], pts[0]), largeurs[0] / 2.0, -1)
+    return gauche + fin + droite[::-1] + deb
+
+
+def _selection_vide(lay):
+    """Vrai s'il n'y a pas de sélection active (le trait peut alors poser la sienne)."""
+    try:
+        return bool(Gimp.Selection.is_empty(lay.get_image()))
+    except Exception:
+        return True
+
+
 def trait(lay, pts, size=4.0, col="#1a1a1a", opacity=100.0, profil="fuseau",
           hardness=0.9, passes=1, tremble=0.0, outil="paintbrush", largeurs=None):
     """Trace une polyligne [[x, y], ...] avec une épaisseur qui varie le long du trait.
     largeurs : facteurs d'épaisseur par segment (remplace le profil si donné).
     passes > 1 : redouble le trait avec un léger décalage (tremble, en px) et une opacité
-    réduite, comme un crayon qui repasse. Les points doivent être serrés (≤ 15 px).
-    Les segments de même épaisseur sont tracés d'un seul geste : pas de « perles »
-    d'opacité aux raccords."""
+    réduite, comme un crayon qui repasse.
+    Rendu : la courbe est lissée puis tracée comme UN SEUL ruban rempli dont la largeur varie
+    continûment (pas de raccords, pas de perles : un trait fluide, comme une vraie pression).
+    Pour un trait doux (hardness < 0,6), au crayon (outil="pencil") ou quand une sélection est
+    déjà active (elle sert à rogner les traits), on revient à la brosse de GIMP."""
     if len(pts) < 2:
         return
     n = len(pts) - 1
     fac = largeurs or [_largeur((i + 0.5) / n, profil) for i in range(n)]
-    # Regroupe les segments consécutifs dont l'épaisseur arrondie (pas de 0,5 px) est la même.
+    ruban = outil == "paintbrush" and hardness >= 0.6 and _selection_vide(lay)
+    if ruban:
+        lisse = _lisser(pts)
+        # Largeur en chaque point lissé : interpolée le long de la longueur du trait d'origine.
+        cum = [0.0]
+        for a, b in zip(pts[:-1], pts[1:]):
+            cum.append(cum[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+        cl = [0.0]
+        for a, b in zip(lisse[:-1], lisse[1:]):
+            cl.append(cl[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+        tot, totl = cum[-1] or 1.0, cl[-1] or 1.0
+        larg, j = [], 0
+        for d in cl:
+            t = d / totl * tot
+            while j < n - 1 and cum[j + 1] < t:
+                j += 1
+            larg.append(max(0.9, size * fac[j]))
+        # Lissage léger des largeurs (évite les marches entre segments d'origine).
+        larg = [sum(larg[max(0, i - 3):i + 4]) / len(larg[max(0, i - 3):i + 4]) for i in range(len(larg))]
+        for k in range(passes):
+            dx = random.uniform(-tremble, tremble) if k else 0.0
+            dy = random.uniform(-tremble, tremble) if k else 0.0
+            contour = [[p[0] + dx, p[1] + dy] for p in _ruban(lisse, larg)]
+            _selection_polygone(lay, contour)
+            _remplir(lay, col, opacity if k == 0 else opacity * 0.45)
+            Gimp.Selection.none(lay.get_image())
+        return
+    # Repli brosse : segments regroupés par épaisseur. Un trait fin (< 4 px) reste d'un seul
+    # tenant : chaque groupe est composé à part, et leurs raccords feraient des perles.
+    if size * max(fac) < 4.0:
+        fac = [sum(fac) / len(fac)] * n
     groupes, cur, w_cur = [], [pts[0]], None
     for i in range(n):
         w = max(0.8, round(size * fac[i] * 2) / 2)
@@ -869,6 +964,549 @@ def pied(lay, talon, orteils, largeur, doigts=3, col="#2a2320", size=6.0, opacit
             trait(lay, [bas, pt(a + L * 0.14, 0)], size=size * 0.4, col=col, profil="pointe")
 
 
+
+# -----------------------------------------------------------------------------
+# Têtes d'animaux : construction complète par espèce (volumes + traits placés)
+# -----------------------------------------------------------------------------
+# Unité : R = rayon du crâne. Les fiches viennent de references/anatomie-animaux.md §9
+# (standards de race, tutoriels de construction) et des conventions d'anatomie artistique ;
+# ce qui est un choix du skill est signalé dans sources.md.
+FICHES_TETES = {
+    # crane : rayons (x, y, z) ; museau : (longueur, rayon base, rayon bout, piqué en °) ;
+    # oreilles : (x, y, z du centre de la base, hauteur, rayon base, écartement en ° [roulis], inclinaison arrière en °) ;
+    # yeux : (lon, lat, taille, ouverture, obliquité, pupille) ; joues : rayon ou None.
+    "renard": {"crane": (1.0, 0.82, 1.0), "museau": (1.35, 0.40, 0.16, 18),
+               "oreilles": (0.48, 0.66, 0.20, 1.20, 0.34, 24, 14),
+               "yeux": (24, 10, 0.19, 0.38, 0.45, "fente"), "joues": 0.36, "larme": True,
+               "truffe": 0.14, "stop": 0.10},
+    "chat":   {"crane": (1.0, 0.95, 1.0), "museau": (0.45, 0.48, 0.32, 10),
+               "oreilles": (0.58, 0.70, 0.0, 0.75, 0.38, 32, 8),
+               "yeux": (26, 4, 0.25, 0.58, 0.25, "fente"), "joues": 0.34, "larme": False,
+               "truffe": 0.11, "stop": 0.05},
+    "chien":  {"crane": (1.0, 0.92, 1.15), "museau": (1.15, 0.50, 0.30, 12),
+               "oreilles": (0.44, 0.80, 0.10, 1.05, 0.34, 12, 5),
+               "yeux": (23, 12, 0.20, 0.40, 0.20, "ronde"), "joues": None, "larme": False,
+               "truffe": 0.17, "stop": 0.18},
+}
+# Style : ce que le dessin s'autorise. "realiste" suit l'anatomie ; "cartoon" grossit les yeux,
+# autorise le sourire et les sourcils (conventions d'animation, pas d'anatomie).
+STYLES = {
+    "realiste": {"yeux": 1.0, "ouverture": 1.0, "sourire": False, "sourcils": False, "tete": 1.0},
+    "cartoon":  {"yeux": 1.6, "ouverture": 1.25, "sourire": True, "sourcils": True, "tete": 1.25},
+}
+
+
+def tete_animale(espece, centre, R, rot=(0, 0, 0), style="realiste", oreille_g=None, oreille_d=None):
+    """Construit la tête d'un animal : crâne, museau, joues, oreilles, aux proportions de
+    l'espèce ("renard", "chat", "chien"). Renvoie une liste de volumes à ajouter à la scène,
+    plus un dict `tete` (dans volumes[0]["tete"]) qui mémorise ce qu'il faut pour
+    visage_animal() : espèce, style, repère local, longueur du museau.
+    centre : centre du crâne (monde, px) ; R : rayon du crâne ; rot = (lacet, tangage, roulis).
+    oreille_g / oreille_d : (écartement, inclinaison arrière) en ° pour casser la symétrie
+    (ex. une oreille couchée : (55, 40))."""
+    f = FICHES_TETES[espece]
+    st = STYLES[style]
+    r = [math.radians(v) for v in rot]
+    cx, cy, cz = f["crane"]
+    crane = ellipsoide(f"crane_{espece}", centre, (cx * R, cy * R, cz * R), rot=rot, anneaux=2, meridiens=2)
+    L, rb, rt, pique = f["museau"]
+    L, rb, rt = L * R, rb * R, rt * R
+    # Le museau part de l'avant du crâne, un peu sous l'équateur, et pique vers le bas.
+    base = (0.0, -0.12 * R, -cz * R * 0.80)
+    ax = (0.0, -math.sin(math.radians(pique)), -math.cos(math.radians(pique)))   # axe local du museau
+    cen_m = tuple(base[k] + ax[k] * L / 2 for k in range(3))
+    # cylindre() a son axe vertical : un tangage de -90° le couche vers l'avant, et -pique le
+    # fait piquer vers le bas ; le tout composé avec l'orientation de la tête.
+    museau = _cylindre_local(f"museau_{espece}", centre, r, cen_m, rb, L, (-90.0 - pique, 0.0), rt)
+    vols = [crane, museau]
+    if f["joues"]:
+        for sx in (-1, 1):
+            vols.append(_ellipsoide_local(f"joue_{'g' if sx < 0 else 'd'}", centre, r,
+                                          (sx * 0.58 * R, -0.32 * R, -0.40 * R),
+                                          (f["joues"] * R, f["joues"] * 0.75 * R, f["joues"] * 0.9 * R)))
+    ox, oy, oz, oh, orb, ecart, arr = f["oreilles"]
+    oreilles_info = {}
+    for sx, perso in ((-1, oreille_g), (1, oreille_d)):
+        e, a = perso if perso else (ecart, arr)
+        base_o = (sx * ox * R, oy * R, oz * R)
+        # Roulis positif = le haut penche vers -x : l'oreille droite (sx = +1) s'écarte avec -e.
+        axe_o = _rot((0.0, 1.0, 0.0), 0.0, math.radians(a), math.radians(-sx * e))
+        cen_o = tuple(base_o[k] + axe_o[k] * oh * R / 2 for k in range(3))
+        vols.append(_cylindre_local(f"oreille_{'g' if sx < 0 else 'd'}", centre, r, cen_o, orb * R, oh * R,
+                                    (a, -sx * e), 0.03 * R))
+        oreilles_info[sx] = (base_o, axe_o, oh * R, orb * R)
+    crane["tete"] = {"espece": espece, "style": style, "centre": centre, "R": R, "rot": rot,
+                     "museau_base": base, "museau_axe": ax, "museau_L": L, "museau_rb": rb, "museau_rt": rt,
+                     "oreilles": oreilles_info}
+    return vols
+
+
+def _ellipsoide_local(nom, centre, r, local, rayons):
+    """Ellipsoïde dont le centre est donné dans le repère local de la tête (déjà orientée par r)."""
+    return ellipsoide(nom, _place(local, centre, r), rayons, rot=[math.degrees(v) for v in r])
+
+
+def _cylindre_local(nom, centre, r, local, rayon, hauteur, incl, rayon_haut):
+    """Cylindre placé dans le repère local de la tête : incl = (tangage, roulis) locaux en °,
+    composés avec l'orientation r de la tête."""
+    rot_tete = [math.degrees(v) for v in r]
+    return cylindre(nom, _place(local, centre, r), rayon, hauteur,
+                    rot=(rot_tete[0], rot_tete[1] + incl[0], rot_tete[2] + incl[1]), rayon_haut=rayon_haut)
+
+
+def _pt_tete(T, local):
+    """Point du repère local de la tête -> pixels image."""
+    r = [math.radians(v) for v in T["rot"]]
+    return projeter(_place(local, T["centre"], r))
+
+
+def _pt_museau(T, t, cote=0.0, haut=0.0):
+    """Point sur ou autour du museau : t = 0 (base) .. 1 (bout) ; cote = -1..1 (largeur) ;
+    haut = -1..1 (dessous .. dessus), en fractions du rayon local du museau."""
+    rb, rt, L = T["museau_rb"], T["museau_rt"], T["museau_L"]
+    rr = rb + (rt - rb) * t
+    b, ax = T["museau_base"], T["museau_axe"]
+    # Repère du museau : u = axe, s = latéral (x), v = vertical perpendiculaire à l'axe.
+    v = (0.0, -ax[2], ax[1])          # perpendiculaire à l'axe, vers le haut
+    return [b[k] + ax[k] * L * t + (1.0 if k == 0 else 0.0) * cote * rr + v[k] * haut * rr for k in range(3)]
+
+
+def visage_animal(lay, crane, expression="neutre", regard=(0.0, 0.0), col="#2a2320", iris=None,
+                  size=6.0, opacity=92.0):
+    """Dessine les traits du visage d'une tête construite par tete_animale() : yeux (oeil()),
+    truffe, bouche, marques du museau, intérieur des oreilles, selon l'espèce et le style
+    mémorisés dans crane["tete"]. expression : "neutre", "endormi", "alerte", "content",
+    "mefiant". En style réaliste, la bouche est la fente sous la truffe (jamais un sourire) et
+    il n'y a pas de sourcils ; en cartoon, sourire et sourcils sont permis."""
+    T = crane["tete"]
+    f, st = FICHES_TETES[T["espece"]], STYLES[T["style"]]
+    R = T["R"]
+    lon, lat, taille, ouv, obl, pup = f["yeux"]
+    taille *= R * st["yeux"]
+    ouv *= st["ouverture"]
+    ferme = expression == "endormi"
+    if expression == "alerte":
+        ouv *= 1.25
+    if expression == "mefiant":
+        ouv *= 0.7
+    if expression == "content" and T["style"] == "realiste":
+        ouv *= 0.85                       # un animal content plisse les yeux, il ne sourit pas
+    iris = iris or {"renard": "#c98a3c", "chat": "#9bbf5a", "chien": "#6b4a2b"}[T["espece"]]
+    for sx in (-1, 1):
+        oeil(lay, crane, lat=lat, lon=sx * lon, taille=taille, ouverture=ouv, obliquite=obl,
+             pupille=pup, iris=iris, col=col, paupiere=size * 0.9, larme=f["larme"] and not ferme,
+             regard=regard, ferme=ferme, pics=(-0.15, 0.2))
+    # Truffe : petit bloc au bout du museau, dessus légèrement bombé, narines.
+    tr = f["truffe"] * R
+    ax = T["museau_axe"]
+    up = (0.0, -ax[2], ax[1])
+    C = _pt_museau(T, 1.0, 0.0, 0.25)
+    poly = [_pt_tete(T, [C[k] + tr * (math.cos(a) * (1.0 if k == 0 else 0.0) + 0.7 * math.sin(a) * up[k]
+                                       - 0.3 * ax[k] * max(0.0, math.sin(a))) for k in range(3)])
+            for a in [2 * math.pi * k / 16 for k in range(16)]]
+    _selection_polygone(lay, poly)
+    _remplir(lay, col)
+    Gimp.Selection.none(lay.get_image())
+    # Bouche : fente verticale sous la truffe puis deux lèvres qui redescendent vers l'arrière.
+    p0 = _pt_tete(T, _pt_museau(T, 0.99, 0.0, -0.35))
+    p1 = _pt_tete(T, _pt_museau(T, 0.95, 0.0, -0.95))
+    trait(lay, courbe2d([p0, p1], 4), size=size * 0.6, col=col, opacity=opacity, profil="pointe")
+    prof = {sx: _to_cam(_place(_pt_museau(T, 0.45, sx * 1.02, -0.6), T["centre"], [math.radians(v) for v in T["rot"]]))[2]
+            for sx in (-1, 1)}
+    proche = min(prof, key=prof.get)
+    for sx in (-1, 1):
+        if sx != proche and prof[sx] - prof[proche] > 0.25 * T["museau_rb"]:
+            continue                                                      # commissure cachée par le museau
+        if st["sourire"] and expression == "content":
+            fin = _pt_tete(T, _pt_museau(T, 0.40, sx * 1.02, -0.35))      # commissure remontée : cartoon
+        else:
+            fin = _pt_tete(T, _pt_museau(T, 0.45, sx * 1.02, -0.85))      # commissure qui descend : réaliste
+        mil = _pt_tete(T, _pt_museau(T, 0.72, sx * 0.98, -0.92))
+        trait(lay, courbe2d([p1, mil, fin], 6), size=size * 0.55, col=col, opacity=opacity * 0.85, profil="pointe")
+    # Coussinets de moustaches : 3 petits points de chaque côté, sur le dessus du museau.
+    for sx in (-1, 1):
+        for k in range(3):
+            q = _pt_tete(T, _pt_museau(T, 0.78 - 0.1 * k, sx * (0.55 + 0.15 * k), 0.15))
+            trait(lay, [q, [q[0] + 0.5, q[1]]], size=size * 0.45, col=col, opacity=55)
+    # Intérieur des oreilles : une ligne qui longe le bord avant, du haut vers la base.
+    for sx, (base_o, axe_o, h_o, r_o) in T["oreilles"].items():
+        pointe = [base_o[k] + axe_o[k] * h_o * 0.92 for k in range(3)]
+        avant = [base_o[k] - r_o * 0.75 * (1.0 if k == 2 else 0.0) + axe_o[k] * h_o * 0.12 for k in range(3)]
+        milieu = [(pointe[k] + avant[k]) / 2 + (r_o * 0.25 if k == 0 else 0.0) * sx for k in range(3)]
+        trait(lay, courbe2d([_pt_tete(T, pointe), _pt_tete(T, milieu), _pt_tete(T, avant)], 5),
+              size=size * 0.45, col=col, opacity=65, profil="fuseau")
+    # Sourcils : cartoon seulement (un animal réel n'a pas de sourcils tracés).
+    if st["sourcils"] and expression in ("alerte", "mefiant", "content"):
+        for sx in (-1, 1):
+            a = _pt_tete(T, (sx * 0.22 * R, 0.50 * R, -0.84 * R))
+            b = _pt_tete(T, (sx * 0.58 * R, (0.60 if expression != "mefiant" else 0.42) * R, -0.70 * R))
+            trait(lay, courbe2d([a, b], 4), size=size * 0.7, col=col, profil="fuseau")
+    Gimp.displays_flush()
+
+
+# -----------------------------------------------------------------------------
+# Segments 3D (membres), tête et figure humaines
+# -----------------------------------------------------------------------------
+
+def segment(nom, A, B, rayon, rayon_fin=None):
+    """Cylindre (ou tronc de cône) qui va du point 3D A au point 3D B : un os, un membre,
+    un cou, un manche. rayon à A, rayon_fin à B (défaut : le même)."""
+    d = [B[k] - A[k] for k in range(3)]
+    L = math.sqrt(sum(v * v for v in d)) or 1.0
+    d = [v / L for v in d]
+    # L'axe local de cylindre() est y ; on cherche (tangage, roulis) tels que l'axe tombe sur d.
+    roulis = -math.asin(max(-1.0, min(1.0, d[0])))
+    c = math.cos(roulis)
+    tangage = math.atan2(d[2], d[1]) if abs(c) > 1e-6 else 0.0
+    centre = tuple((A[k] + B[k]) / 2 for k in range(3))
+    return cylindre(nom, centre, rayon, L, rot=(0.0, math.degrees(tangage), math.degrees(roulis)),
+                    rayon_haut=rayon_fin)
+
+
+def tete_humaine(centre, R, rot=(0, 0, 0), sexe="h"):
+    """Tête humaine construite à la Loomis : boule du crâne (rayon R), plans latéraux,
+    mâchoire, cou. Renvoie des volumes à ajouter à la scène ; volumes[0]["tete"] mémorise
+    les repères pour visage_humain(). Repères (centre de la boule = ligne des sourcils) :
+    tiers du visage = 2R/3 ; base du nez à -2R/3 ; menton à -4R/3 ; ligne des cheveux à
+    +2R/3 ; yeux juste sous les sourcils (à mi-hauteur de la tête) ; oreilles entre sourcils
+    et base du nez. Sources : references/tete-et-yeux.md §1."""
+    r = [math.radians(v) for v in rot]
+    T3 = 2.0 * R / 3.0
+    crane = ellipsoide("crane", centre, (0.92 * R, R, R), rot=rot, anneaux=2, meridiens=2)
+    # Mâchoire : boîte biseautée approchée par un ellipsoïde aplati qui descend jusqu'au menton.
+    machoire = _ellipsoide_local("machoire", centre, r, (0.0, -0.78 * R, -0.18 * R),
+                                 ((0.80 if sexe == "h" else 0.74) * R, 0.60 * R, 0.80 * R))
+    cou = segment("cou", _place((0.0, -1.15 * R, 0.25 * R), centre, r), _place((0.0, -1.9 * R, 0.35 * R), centre, r),
+                  (0.42 if sexe == "h" else 0.34) * R)
+    crane["tete"] = {"espece": "humain", "style": "realiste", "centre": centre, "R": R, "rot": rot, "sexe": sexe}
+    return [crane, machoire, cou]
+
+
+def visage_humain(lay, crane, expression="neutre", regard=(0.0, 0.0), col="#2a2320", iris="#6b5a4a",
+                  size=5.0, opacity=92.0, cheveux=True):
+    """Traits d'une tête construite par tete_humaine(), placés par les proportions Loomis :
+    sourcils, yeux (largeur = 1/5 de la tête, un œil d'écart), nez (base à un tiers sous les
+    sourcils, largeur = un œil), bouche (à un tiers entre nez et menton, largeur = écart des
+    pupilles), oreilles (entre sourcils et base du nez), mâchoire, ligne des cheveux.
+    expression : "neutre", "sourire" (léger, commissures relevées et yeux un peu plissés),
+    "serieux" (sourcils rapprochés), "surpris" (yeux ouverts, sourcils hauts), "endormi"."""
+    T = crane["tete"]
+    R, centre = T["R"], T["centre"]
+    r = [math.radians(v) for v in T["rot"]]
+    P = lambda loc: projeter(_place(loc, centre, r))
+    T3 = 2.0 * R / 3.0
+    oe = 0.18 * R                                       # demi-largeur d'un œil (tête = 5 yeux)
+    y_yeux = -0.17 * R                                  # mi-hauteur de la tête (sommet +R, menton -4R/3)
+    ouv = {"neutre": 0.42, "sourire": 0.34, "serieux": 0.38, "surpris": 0.6, "endormi": 0.3}[expression]
+    for sx in (-1, 1):
+        lon = math.degrees(math.asin(0.36))             # centre de l'œil à ±0,36 R (un œil d'écart)
+        lat = math.degrees(math.asin(y_yeux / R))
+        oeil(lay, crane, lat=lat, lon=sx * lon, taille=oe, ouverture=ouv, obliquite=0.05, regard=regard,
+             pupille="ronde", iris=iris, col=col, paupiere=size * 0.9, ferme=(expression == "endormi"))
+    # Sourcils : sur la ligne des sourcils (y = 0), du coin interne au-delà du coin externe.
+    hb = {"neutre": 0.08, "sourire": 0.09, "serieux": 0.02, "surpris": 0.2, "endormi": 0.06}[expression]
+    for sx in (-1, 1):
+        a = P((sx * 0.17 * R, hb * R + (0.0 if expression != "serieux" else -0.04 * R), -0.93 * R))
+        m = P((sx * 0.40 * R, (hb + 0.05) * R, -0.86 * R))
+        b = P((sx * 0.62 * R, (hb + 0.01) * R, -0.72 * R))
+        trait(lay, courbe2d([a, m, b], 5), size=size * 0.9, col=col, opacity=opacity, profil="pointe")
+    # Nez : arête côté ombre (gauche de l'image = côté éloigné de la lumière par défaut), bout, narines.
+    base = P((0.0, -T3, -1.02 * R))
+    arete = [P((0.06 * R, -0.05 * R, -0.95 * R)), P((0.12 * R, -0.35 * R, -1.02 * R)), P((0.14 * R, -0.58 * R, -1.08 * R))]
+    trait(lay, courbe2d(arete, 5), size=size * 0.5, col=col, opacity=70, profil="pointe")
+    bout = courbe2d([P((0.16 * R, -0.58 * R, -1.08 * R)), P((0.0, -0.66 * R, -1.09 * R)), P((-0.16 * R, -0.58 * R, -1.08 * R))], 6)
+    trait(lay, bout, size=size * 0.6, col=col, opacity=opacity, profil="fuseau")
+    for sx in (-1, 1):
+        nar = courbe2d([P((sx * 0.18 * R, -0.60 * R, -1.0 * R)), P((sx * 0.14 * R, -0.67 * R, -1.02 * R)), P((sx * 0.06 * R, -0.68 * R, -1.06 * R))], 5)
+        trait(lay, nar, size=size * 0.5, col=col, opacity=80, profil="fuseau")
+    # Bouche : ligne de séparation des lèvres à un tiers entre nez et menton, largeur = écart des pupilles.
+    y_b = -T3 - T3 / 3.0
+    lev = 0.06 * R if expression == "sourire" else 0.0
+    bouche = [P((-0.36 * R, y_b + lev, -0.92 * R)), P((-0.12 * R, y_b - 0.015 * R, -1.0 * R)),
+              P((0.12 * R, y_b - 0.015 * R, -1.0 * R)), P((0.36 * R, y_b + lev, -0.92 * R))]
+    trait(lay, courbe2d(bouche, 8), size=size * 0.8, col=col, opacity=opacity, profil="fuseau")
+    # Ombre sous la lèvre inférieure : un court trait, pas un contour.
+    trait(lay, courbe2d([P((-0.10 * R, y_b - 0.17 * R, -0.98 * R)), P((0.0, y_b - 0.19 * R, -1.0 * R)), P((0.10 * R, y_b - 0.17 * R, -0.98 * R))], 5),
+          size=size * 0.4, col=col, opacity=45, profil="fuseau")
+    # Oreilles : de la ligne des sourcils à la base du nez, sur le plan latéral.
+    for sx in (-1, 1):
+        ore = courbe2d([P((sx * 0.92 * R, 0.0, 0.05 * R)), P((sx * 1.02 * R, -0.25 * R, 0.1 * R)),
+                        P((sx * 0.96 * R, -0.6 * R, 0.08 * R)), P((sx * 0.86 * R, -0.66 * R, 0.0))], 6)
+        trait(lay, ore, size=size * 0.6, col=col, opacity=80, profil="fuseau")
+    # Mâchoire : de sous l'oreille au menton, et ligne des cheveux.
+    for sx in (-1, 1):
+        mach = courbe2d([P((sx * 0.88 * R, -0.62 * R, -0.05 * R)), P((sx * 0.70 * R, -1.05 * R, -0.45 * R)),
+                         P((sx * 0.30 * R, -1.30 * R, -0.80 * R)), P((0.0, -1.34 * R, -0.88 * R))], 6)
+        trait(lay, mach, size=size * (0.9 if sx < 0 else 0.5), col=col, opacity=opacity, profil="fuseau")
+    if cheveux:
+        ch = courbe2d([P((-0.75 * R, 0.45 * R, -0.55 * R)), P((-0.4 * R, 0.68 * R, -0.78 * R)), P((0.0, 0.70 * R, -0.85 * R)),
+                       P((0.4 * R, 0.68 * R, -0.78 * R)), P((0.75 * R, 0.45 * R, -0.55 * R))], 6)
+        trait(lay, ch, size=size * 0.5, col=col, opacity=60, profil="fuseau")
+    Gimp.displays_flush()
+
+
+def figure_humaine(sol_xz=(0.0, 0.0), H=100.0, tetes=8.0, appui="droite", bras=((20, 10), (20, 10)),
+                   tete_rot=(0, 0, 0), sexe="h"):
+    """Figure debout construite en volumes 3D aux proportions en têtes (H = hauteur d'une tête ;
+    tetes = 8 idéalisé Loomis, 7,5 moyen Richer). Repères (depuis le sol, en H) : genou 2,1 ;
+    entrejambe tetes-4 ; nombril tetes-3 ; mamelons tetes-2 ; menton tetes-1 ; épaules
+    (acromion) tetes-1,5 ; largeur d'épaules 2 H (2⅓ idéalisé), hanches 1,5 H ; coude au
+    nombril, poignet à l'entrejambe, bout des doigts à mi-cuisse.
+    appui : "droite" / "gauche" / "deux" : la jambe qui porte le poids ; le bassin monte de ce
+    côté et l'épaule descend (contrapposto), la jambe libre fléchit un peu.
+    bras : ((élévation, flexion du coude), ...) en degrés pour le bras gauche puis droit.
+    Renvoie (volumes, joints) ; joints = dict nom -> point 3D, à projeter avec projeter()
+    pour dessiner les membres avec patte()."""
+    x0, z0 = sol_xz
+    larg_ep = ((2.33 if tetes >= 8 else 2.0) * H / 2 if sexe == "h" else 1.75 * H / 2) - 0.22 * H   # acromion (le deltoïde ajoute le reste)
+    larg_ha = 0.75 * H if sexe == "h" else 0.8 * H
+    y_ent, y_nomb, y_mam, y_ment = (tetes - 4) * H, (tetes - 3) * H, (tetes - 2) * H, (tetes - 1) * H
+    y_ep = (tetes - 1.5) * H
+    # Contrapposto : côté d'appui -> hanche haute, épaule basse.
+    sa = {"droite": 1, "gauche": -1, "deux": 0}[appui]
+    tilt_h, tilt_e = 0.07 * H * sa, -0.05 * H * sa
+    J = {}
+    J["tete"] = (x0, (tetes - 0.5) * H, z0)
+    J["cou_h"] = (x0, y_ment - 0.05 * H, z0 + 0.05 * H)
+    J["cou_b"] = (x0, y_ep + 0.15 * H, z0 + 0.05 * H)
+    for sx, nom in ((-1, "g"), (1, "d")):
+        ha = (x0 + sx * 0.4 * H, y_ent + 0.1 * H + sx * tilt_h, z0)
+        # Jambe d'appui verticale ; jambe libre : genou un peu en avant et pied un peu décalé.
+        libre = (sa != 0 and sx != sa)
+        ge = (ha[0] + (sx * 0.05 * H), 2.1 * H, z0 - (0.25 * H if libre else 0.0))
+        ch = (ha[0] + sx * 0.08 * H, 0.25 * H, z0 - (0.15 * H if libre else 0.0))
+        pi = (ch[0] + sx * 0.05 * H, 0.0, ch[2] - 0.45 * H)
+        J[f"hanche_{nom}"], J[f"genou_{nom}"], J[f"cheville_{nom}"], J[f"pied_{nom}"] = ha, ge, ch, pi
+        ep = (x0 + sx * larg_ep, y_ep + sx * tilt_e, z0)
+        el, fl = (math.radians(v) for v in bras[0 if sx < 0 else 1])
+        co = (ep[0] + sx * math.sin(el) * 1.5 * H * 0.9, ep[1] - math.cos(el) * 1.5 * H * 0.9, z0 + 0.05 * H)
+        po = (co[0] + sx * math.sin(el) * 1.2 * H * 0.9, co[1] - math.cos(el + fl) * 1.2 * H * 0.9, z0 - math.sin(fl) * 1.2 * H * 0.9)
+        ma = (po[0] + (po[0] - co[0]) * 0.45, po[1] + (po[1] - co[1]) * 0.45, po[2] + (po[2] - co[2]) * 0.45)
+        J[f"epaule_{nom}"], J[f"coude_{nom}"], J[f"poignet_{nom}"], J[f"main_{nom}"] = ep, co, po, ma
+    V = tete_humaine(J["tete"], 0.43 * H, rot=tete_rot, sexe=sexe)
+    V.append(ellipsoide("thorax", (x0, y_mam + 0.1 * H, z0), (0.82 * H, 1.0 * H, 0.52 * H), rot=(0, 0, -tilt_e / H * 25)))
+    V.append(ellipsoide("abdomen", (x0, y_nomb + 0.05 * H, z0), (0.62 * H, 0.42 * H, 0.42 * H)))
+    V.append(boite("bassin", (x0, y_ent + 0.5 * H, z0), (larg_ha * 2 * 0.95, 0.9 * H, 0.7 * H), rot=(0, 0, tilt_h / H * 25)))
+    for sx, nom in ((-1, "g"), (1, "d")):   # clavicules : du creux du cou à l'acromion
+        V.append(segment(f"clavicule_{nom}", (x0 + sx * 0.12 * H, y_ep + 0.05 * H, z0 - 0.3 * H), J[f"epaule_{nom}"], 0.06 * H))
+    for nom in ("g", "d"):
+        V.append(segment(f"cuisse_{nom}", J[f"hanche_{nom}"], J[f"genou_{nom}"], 0.30 * H, 0.19 * H))
+        V.append(segment(f"jambe_{nom}", J[f"genou_{nom}"], J[f"cheville_{nom}"], 0.19 * H, 0.11 * H))
+        V.append(ellipsoide(f"pied_{nom}", ((J[f"cheville_{nom}"][0] + J[f"pied_{nom}"][0]) / 2, 0.12 * H,
+                                            (J[f"cheville_{nom}"][2] + J[f"pied_{nom}"][2]) / 2), (0.17 * H, 0.12 * H, 0.42 * H)))
+        V.append(segment(f"bras_{nom}", J[f"epaule_{nom}"], J[f"coude_{nom}"], 0.19 * H, 0.14 * H))
+        V.append(segment(f"avant_bras_{nom}", J[f"coude_{nom}"], J[f"poignet_{nom}"], 0.15 * H, 0.09 * H))
+        V.append(segment(f"main_{nom}", J[f"poignet_{nom}"], J[f"main_{nom}"], 0.12 * H, 0.05 * H))
+    for sx, nom in ((-1, "g"), (1, "d")):   # deltoïdes : épaules rondes, pas des tubes qui sortent d'un œuf
+        V.append(ellipsoide(f"deltoide_{nom}", J[f"epaule_{nom}"], (0.24 * H, 0.26 * H, 0.24 * H)))
+    return V, J
+
+
+def joints2d(J):
+    """Projette le dict de joints 3D de figure_humaine() en pixels image."""
+    return {k: projeter(v) for k, v in J.items()}
+
+
+# -----------------------------------------------------------------------------
+# Natures mortes : objets de révolution, ombre portée
+# -----------------------------------------------------------------------------
+
+def objet_revolution(nom, base, profil, anneaux_par_segment=1):
+    """Objet tourné (bouteille, vase, tasse, verre, pomme sur pied) : profil = liste de
+    (rayon, hauteur depuis le sol) du bas vers le haut ; chaque intervalle devient un tronc
+    de cône. base = (x, y, z) du centre de la base. Renvoie la liste des volumes.
+    Ex. bouteille : [(60, 0), (62, 180), (40, 230), (18, 260), (18, 330)]."""
+    vols = []
+    for i in range(len(profil) - 1):
+        (r0, h0), (r1, h1) = profil[i], profil[i + 1]
+        if h1 <= h0:
+            continue
+        vols.append(cylindre(f"{nom}_{i}", (base[0], base[1] + (h0 + h1) / 2, base[2]), r0, h1 - h0,
+                             rayon_haut=r1, anneaux=anneaux_par_segment))
+    for v in vols:                  # géométrie gardée : surface() et modele_doux() s'en servent
+        v["revolution"] = {"base": base, "profil": profil}
+    return vols
+
+
+# -----------------------------------------------------------------------------
+# Surface paramétrée et modelé doux (rendu au crayon par valeurs, pas en trame)
+# -----------------------------------------------------------------------------
+
+def surface(objet, u, v):
+    """Point et normale sur la surface d'un objet, en coordonnées monde.
+    objet : un ellipsoïde, ou la liste renvoyée par objet_revolution().
+    u : tour en degrés (0-360) ; v : hauteur de 0 (bas) à 1 (haut).
+    Sert à poser sur la forme ce qui doit la suivre : bande de valeur, reflet, motif,
+    hachure qui s'enroule. Renvoie ((x, y, z), (nx, ny, nz))."""
+    th = math.radians(u)
+    if isinstance(objet, list):                      # objet de révolution
+        rev = objet[0]["revolution"]
+        prof, b = rev["profil"], rev["base"]
+        h = prof[0][1] + (prof[-1][1] - prof[0][1]) * v
+        for (r0, h0), (r1, h1) in zip(prof[:-1], prof[1:]):
+            if h0 <= h <= h1 and h1 > h0:
+                t = (h - h0) / (h1 - h0)
+                r, pente = r0 + (r1 - r0) * t, (r1 - r0) / (h1 - h0)
+                break
+        else:
+            r, pente = prof[-1][0], 0.0
+        n = (math.cos(th), -pente, math.sin(th))
+        l = math.sqrt(n[0] ** 2 + n[1] ** 2 + n[2] ** 2)
+        return ((b[0] + r * math.cos(th), b[1] + h, b[2] + r * math.sin(th)),
+                (n[0] / l, n[1] / l, n[2] / l))
+    a, bb, c = objet["rayons"]                        # ellipsoïde
+    r = [math.radians(x) for x in objet["rot"]]
+    phi = -math.pi / 2 + math.pi * v
+    loc = (a * math.cos(phi) * math.cos(th), bb * math.sin(phi), c * math.cos(phi) * math.sin(th))
+    nl = _rot((loc[0] / (a * a), loc[1] / (bb * bb), loc[2] / (c * c)), *r)
+    l = math.sqrt(sum(x * x for x in nl)) or 1.0
+    return _place(loc, objet["centre"], r), (nl[0] / l, nl[1] / l, nl[2] / l)
+
+
+def modele_doux(lay, objet, lumiere=(-1.0, -1.4, -0.9), col="#3a3330", valeur_locale=0.0,
+                force=60.0, reflet=0.35, durete=0.15, hachures=0, graine=None, papier=None):
+    """Modelé au crayon d'un volume : le dégradé lumière -> demi-teinte -> terminateur ->
+    lumière réfléchie, posé en passes douces qui se recouvrent (comme l'estompe), rogné par la
+    silhouette. C'est le rendu par VALEURS : à préférer aux trames de hachures qui couvrent
+    tout l'objet (effet « gravure »).
+    objet : ellipsoïde ou liste d'objet_revolution ; lumiere : même vecteur qu'ombre_portee
+      (passe LE MÊME aux deux) ; z négatif = source du côté du spectateur (éclairage de 3/4 avant,
+      le défaut) ; z positif = contre-jour, l'objet est presque tout dans l'ombre.
+    papier : couleur du fond pour couvrir d'abord la silhouette (cache l'ombre portée dessous).
+    valeur_locale : 0 (objet blanc) à 1 (objet noir) ; une pomme rouge ou un bois moyen ≈ 0,35,
+      elle assombrit tout l'objet, même côté lumière.
+    force : opacité de la passe la plus sombre ; reflet : part de lumière rendue côté ombre près
+      du bord (table claire qui renvoie la lumière) ; durete : 0,1-0,3 (doux) à 0,6 (net).
+    hachures : nombre de hachures ajoutées SEULEMENT dans l'ombre propre (0 = aucune ; 15-40
+      pour un crayon vivant), de longueurs et d'espacements irréguliers, qui suivent la forme.
+    Pose le modelé AVANT le contour (calque Valeurs sous Croquis/Encrage)."""
+    rnd = random.Random(graine)
+    vols = objet if isinstance(objet, list) else [objet]
+    lx, ly, lz = lumiere
+    s = (lx, -ly, lz)                                   # direction vers la source
+    ls = math.sqrt(sum(x * x for x in s)) or 1.0
+    s = [x / ls for x in s]
+    # 1. Rogner par la silhouette (union des volumes) : rien ne déborde.
+    for k, v in enumerate(vols):
+        _selection_polygone(lay, v["silhouette"], "replace" if k == 0 else "add")
+    if papier:
+        _remplir(lay, papier)
+    if valeur_locale > 0:
+        _remplir(lay, col, 100.0 * valeur_locale * 0.6)
+    # 2. Échantillonner la surface : méridiens, valeur en chaque point visible.
+    NU, NV = 72, 36
+    meridiens = []
+    for i in range(NU):
+        pts = []
+        for j in range(NV + 1):
+            # Ellipsoïde : on évite les pôles, où tous les méridiens se rejoignent (tache).
+            v = j / NV if isinstance(objet, list) else 0.04 + 0.92 * j / NV
+            p, n = surface(objet, 360.0 * i / NU, v)
+            pc, nc = _to_cam(p), _to_cam(n, translate=False)
+            if not _visible(pc, nc):
+                pts.append(None)
+                continue
+            lam = n[0] * s[0] + n[1] * s[1] + n[2] * s[2]          # -1 (dos à la source) .. 1
+            # Sombre = 1 - éclairement ; terminateur un peu plus sombre que l'ombre (cœur d'ombre),
+            # puis lumière réfléchie vers le bord côté ombre.
+            d = 0.5 - 0.5 * lam
+            if lam < 0:
+                vue = abs(nc[2]) / (math.sqrt(sum(x * x for x in nc)) or 1.0)   # 1 = face à nous
+                d -= reflet * (1.0 - vue) * min(1.0, -lam * 2.5) * 0.6
+                d += 0.12 * math.exp(-((lam + 0.12) / 0.12) ** 2)        # cœur d'ombre
+            pts.append((_proj(pc), max(0.0, min(1.0, d))))
+        meridiens.append(pts)
+    # Pas entre méridiens à l'écran -> taille de la brosse (les passes doivent se fondre).
+    xs = [q[0][0] for m in meridiens for q in m if q]
+    if not xs:
+        Gimp.Selection.none(lay.get_image())
+        return
+    taille = max(6.0, (max(xs) - min(xs)) / (NU / 2) * 2.6)
+    # 3. Passes : chaque seuil franchi ajoute une couche douce (accumulation = dégradé).
+    Gimp.context_push()
+    Gimp.context_set_foreground(color(col))
+    Gimp.context_set_brush_hardness(durete)
+    Gimp.context_set_brush_size(taille)
+    # 10 seuils de 0,12 à 0,80 : à force=60, une ombre propre atteint ~50 % de noir (papier
+    # blanc) ; le terminateur un peu plus ; seul le point le plus éclairé reste le papier.
+    for k in range(10):
+        seuil = 0.12 + 0.68 * k / 9
+        Gimp.context_set_opacity(force * (0.06 if seuil < 0.4 else 0.11))
+        for m in meridiens:
+            run = []
+            for q in m + [None]:
+                if q and q[1] >= seuil:
+                    run.append(q[0])
+                elif run:
+                    if len(run) > 1:            # un point isolé ferait une tache
+                        Gimp.paintbrush_default(lay, [c for pt in run for c in pt])
+                    run = []
+    Gimp.context_pop()
+    # 4. Quelques hachures dans l'ombre propre seulement, irrégulières, le long des parallèles.
+    ombre = [(i, j) for i, m in enumerate(meridiens) for j, q in enumerate(m) if q and q[1] >= 0.62]
+    for _ in range(int(hachures)):
+        if not ombre:
+            break
+        i, j = rnd.choice(ombre)
+        lg = rnd.randint(3, 8)
+        pts = []
+        for k in range(lg):
+            q = meridiens[(i + k) % NU][j]
+            if not q:
+                break
+            pts.append(q[0])
+        if len(pts) >= 3:
+            trait(lay, courbe2d(pts), size=rnd.uniform(1.8, 3.2), col=col, opacity=rnd.uniform(35, 60),
+                  profil="fuseau", hardness=0.5)
+    Gimp.Selection.none(lay.get_image())
+
+
+def ombre_portee(lay, volumes, lumiere=(-1.0, -1.6, 0.6), sol_y=0.0, col="#2a2320", pas=9.0, angle=35.0,
+                 size=2.5, opacity=60.0, papier=None, ton=None):
+    """Ombre portée au sol d'un ou plusieurs volumes, calculée en projetant leur surface le
+    long de la direction de la lumière (vecteur 3D : d'où elle VIENT ; (-1, -1.6, 0.6) =
+    en haut à gauche, un peu derrière). L'ombre est remplie de hachures parallèles ;
+    papier = couleur pour l'aplatir d'abord (ombre pleine claire) ; ton = 0-1 : ombre en aplat de
+    valeur, sans hachures (rendu crayon par valeurs, à préférer hors gravure/encre).
+    Dessine les ombres AVANT les objets (ou sur un calque dessous) : l'ombre passe sous eux."""
+    lx, ly, lz = lumiere
+    if ly >= 0:
+        ly = -1e-3
+    pts = []
+    for v in volumes:
+        for p in v.get("surf3d", []):
+            t = (p[1] - sol_y) / (-ly)                       # distance le long du rayon jusqu'au sol
+            pts.append(_proj(_to_cam((p[0] - lx * t, sol_y, p[2] - lz * t))))   # on s'éloigne de la source
+    if len(pts) < 3:
+        return
+    poly = _hull(pts)
+    _selection_polygone(lay, poly)
+    if papier:
+        _remplir(lay, papier)
+    if ton is not None:
+        # Rendu crayon par valeurs : un aplat (ton = 0-1) au lieu de la trame de hachures ;
+        # l'ombre de contact (trait épais au pied de l'objet) se pose ensuite à part.
+        _remplir(lay, col, 100.0 * ton * 0.6)
+        Gimp.Selection.none(lay.get_image())
+        return
+    # Hachures dans la sélection : lignes parallèles qui couvrent la boîte englobante.
+    xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+    x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+    a = math.radians(angle)
+    dx, dy = math.cos(a), math.sin(a)
+    nx, ny = -dy, dx
+    diag = math.hypot(x1 - x0, y1 - y0)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    n = int(diag / pas) + 1
+    for i in range(-n // 2, n // 2 + 1):
+        ox, oy = cx + nx * i * pas + random.uniform(-1, 1), cy + ny * i * pas
+        trait(lay, [[ox - dx * diag, oy - dy * diag], [ox + dx * diag, oy + dy * diag]],
+              size=size, col=col, opacity=opacity, profil="fuseau")
+    Gimp.Selection.none(lay.get_image())
+    # Contour de l'ombre : plus appuyé près de l'objet (contact), perdu à l'extrémité.
+    trait(lay, poly + [poly[0]], size=size * 0.8, col=col, opacity=opacity * 0.6, profil="constant")
+
 result = ("volumes3d chargé : camera, cadrer, ellipsoide, boite, cylindre, par_nom, scene, sol, "
           "projeter, courbe3d, courbe2d, trait, bord_fourrure, contours_visibles, croquis_auto, "
-          "oeil, membre_quadrupede, patte, pied")
+          "oeil, tete_animale, visage_animal, tete_humaine, visage_humain, figure_humaine, joints2d, "
+          "segment, objet_revolution, ombre_portee, membre_quadrupede, patte, pied")
